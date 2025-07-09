@@ -12,6 +12,7 @@ import numpy as np
 import torch
 from PIL import Image
 from tqdm import tqdm
+import torch.nn.functional as F
 
 
 def get_sdpa_settings():
@@ -169,6 +170,15 @@ class AsyncVideoFrameLoader:
         return len(self.images)
 
 
+def renormalize(arr):
+    foreground = arr[arr != 0]
+    min_val, max_val = np.min(foreground), np.max(foreground)
+
+    scaled = (arr - min_val) / (max_val - min_val + 1e-8)
+    scaled[arr == 0] = 0 
+
+    return scaled
+
 def load_video_frames(
     video_path,
     image_size,
@@ -196,6 +206,16 @@ def load_video_frames(
         )
     elif is_str and os.path.isdir(video_path):
         return load_video_frames_from_jpg_images(
+            video_path=video_path,
+            image_size=image_size,
+            offload_video_to_cpu=offload_video_to_cpu,
+            img_mean=img_mean,
+            img_std=img_std,
+            async_loading_frames=async_loading_frames,
+            compute_device=compute_device,
+        )
+    elif is_str and video_path.endswith('.npy'):
+        return load_video_frames_from_npy_files(
             video_path=video_path,
             image_size=image_size,
             offload_video_to_cpu=offload_video_to_cpu,
@@ -276,6 +296,47 @@ def load_video_frames_from_jpg_images(
     images /= img_std
     return images, video_height, video_width
 
+# My Code 
+def load_video_frames_from_npy_files(
+    video_path,
+    image_size,
+    offload_video_to_cpu,
+    img_mean=(0.485, 0.456, 0.406),
+    img_std=(0.229, 0.224, 0.225),
+    async_loading_frames=False,
+    compute_device=torch.device("cuda"),
+):  
+
+    img_mean = torch.tensor(img_mean, dtype=torch.float32)[:, None, None]
+    img_std = torch.tensor(img_std, dtype=torch.float32)[:, None, None]
+
+    images = np.load(video_path)
+    print(f'Image shape{images.shape}')
+  
+    images = np.delete(images, 1, axis=0)
+    for i in range(images.shape[0]):
+        images[i] = renormalize(images[i])
+    images = torch.from_numpy(images)
+
+    images = torch.permute(images, (3, 0, 1, 2))
+    video_height = images.shape[2]
+    video_width = images.shape[3]
+    print(f'This this {torch.unique(images)}')
+    images = F.interpolate(images, size=(image_size, image_size), mode='bilinear', align_corners=False)
+    print(f'This this {torch.unique(images)}')
+
+
+    if not offload_video_to_cpu:
+        images = images.to(compute_device)
+        img_mean = img_mean.to(compute_device)
+        img_std = img_std.to(compute_device)
+    # normalize by mean and std
+    images -= img_mean
+    images /= img_std
+    return images, video_height, video_width
+
+
+# My Code
 
 def load_video_frames_from_video_file(
     video_path,

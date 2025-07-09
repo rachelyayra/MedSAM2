@@ -11,11 +11,11 @@ import torch
 
 from tqdm import tqdm
 
-from sam2.modeling.sam2_base import NO_OBJ_SCORE, SAM2Base
+from sam2.modeling.sam2_hq_base import NO_OBJ_SCORE, SAM2HQBase
 from sam2.utils.misc import concat_points, fill_holes_in_mask_scores, load_video_frames
 
 
-class SAM2VideoPredictorNPZ(SAM2Base):
+class SAM2HQVideoPredictor(SAM2HQBase):
     """The predictor class to handle user interactions and manage inference states."""
 
     def __init__(
@@ -43,12 +43,7 @@ class SAM2VideoPredictorNPZ(SAM2Base):
     @torch.inference_mode()
     def init_state(
         self,
-        #video_path,
-        # added below
         video_path,
-        images = None,
-        video_height = None,
-        video_width = None,
         offload_video_to_cpu=False,
         offload_state_to_cpu=False,
         async_loading_frames=False,
@@ -1175,4 +1170,3 @@ class SAM2VideoPredictorNPZ(SAM2Base):
             non_cond_frame_outputs.pop(t, None)
             for obj_output_dict in inference_state["output_dict_per_obj"].values():
                 obj_output_dict["non_cond_frame_outputs"].pop(t, None)
-
