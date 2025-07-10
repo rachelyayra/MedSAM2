@@ -25,8 +25,19 @@ from training.dataset.vos_segment_loader import (
     MultiplePNGSegmentLoader,
     PalettisedPNGSegmentLoader,
     SA1BSegmentLoader,
+    BraTSSegmentLoader,
+    TestSegmentLoader,
     NPZSegmentLoader
 )
+
+def renormalize(arr):
+    foreground = arr[arr != 0]
+    min_val, max_val = np.min(foreground), np.max(foreground)
+
+    scaled = (arr - min_val) / (max_val - min_val + 1e-8)
+    scaled[arr == 0] = 0 
+
+    return scaled
 
 
 @dataclass
@@ -384,3 +395,75 @@ class JSONRawDataset(VOSRawDataset):
 
     def __len__(self):
         return len(self.video_names)
+
+
+class BraTSRawDataset(VOSRawDataset):
+    def __init__(
+        self,
+        img_folder,
+        gt_folder,
+        file_list_txt
+        ):
+        self.folder_path = img_folder
+        self.gt_path = gt_folder
+        self.video_names = [i for i in sorted(os.listdir(img_folder)) if i.endswith('.npy')]
+        self.curr_vid = ''
+    
+
+    def __len__(self):
+        return len(self.video_names)
+
+
+    def get_video(self, video_idx):
+        # print(f'This is the length of the video {len(self.video_names)}')
+        video_name = self.video_names[video_idx]
+        self.curr_vid = video_name
+        # video_name = os.path.join(self.folder_path, video_name_temp, self.data_dict[acc_idx])
+        video_frame_path = os.path.join(self.folder_path, video_name)
+        
+        full_video = np.load(video_frame_path)
+        full_video = full_video[1:, :, :, :]
+        label_name = video_name[:-8]
+
+        for i in range(full_video.shape[0]):
+            full_video[i] = renormalize(full_video[i])
+        
+        full_video = torch.from_numpy(full_video)
+        full_video = torch.permute(full_video, (3, 0, 1, 2))
+
+        label = [i for i in os.listdir(self.gt_path) if (label_name in i and i.endswith('.npy')) ][0]
+
+        
+        label_path = os.path.join(self.gt_path, label)
+        
+        segment_loader = BraTSSegmentLoader(
+        mask_path = label_path
+        )
+        
+        frames = []
+        for frame_idx in range(160):
+            frames.append(VOSFrame(frame_idx, image_path='null', data = full_video[frame_idx] ))
+
+
+        video = VOSVideo(video_name, video_idx, frames)
+        return video, segment_loader
+    
+
+class TestDataset(VOSRawDataset):
+    def __init__(self):
+        self.imgs = [ torch.rand(20, 3, 512, 512) for num in range(20)]
+    
+    def __len__(self):
+        return len(self.imgs)
+    
+    def get_video(self, idx):
+
+        full_video = self.imgs[idx]
+        frames = []
+        for frame_idx in range(len(full_video)):
+            frames.append(VOSFrame(frame_idx, image_path='null', data = full_video[frame_idx] ))
+        video = VOSVideo(str(idx), idx, frames)
+
+        segment_loader = TestSegmentLoader()
+
+        return video, segment_loader

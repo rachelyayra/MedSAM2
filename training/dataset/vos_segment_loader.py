@@ -334,3 +334,81 @@ class NPZSegmentLoader:
             binary_segments[int(obj_id)] = torch.from_numpy(binary_mask).bool()
 
         return binary_segments
+
+
+class BraTSSegmentLoader:
+    def __init__(self, mask_path):
+        """
+        Initialize the BraTS Mask Loader.
+        
+        Args:
+            masks (numpy.ndarray): Array of masks with shape (img_num, H, W).
+        """
+        self.mask_path = mask_path
+        self.mask = np.load(self.mask_path)
+
+
+    def load(self, frame_idx):
+        """
+        Load the single mask for the given frame index and convert it to binary segments.
+
+        Args:
+            frame_idx (int): Index of the frame to load.
+
+        Returns:
+            dict: A dictionary where keys are object IDs and values are binary masks.
+
+        """
+        # Correct the logic for loading masks
+        
+        
+        mask = self.mask[:, :, :, frame_idx]
+        # Find unique object IDs in the mask, excluding the background (0)
+        # logging.warning(f'The shape of the Mask {mask.shape}')
+        object_ids = [i for i in range(1,4)]
+
+        # For each mask, select the specific mask for that
+        binary_segments = {}
+        for obj_id in object_ids:
+            temp_mask = torch.from_numpy(mask[obj_id])
+            if  not torch.all(temp_mask == 0):
+                binary_segments[int(obj_id)] = torch.from_numpy(mask[obj_id])
+
+        # print(f'Here are the classes {binary_segments.keys()}')
+
+        return binary_segments
+
+
+class TestSegmentLoader:
+    def __init__(self):
+        """
+        Initialize the BraTS Mask Loader.
+        
+        Args:
+            masks (numpy.ndarray): Array of masks with shape (img_num, H, W).
+        """
+
+
+    def load(self, frame_idx):
+        """
+        Load the single mask for the given frame index and convert it to binary segments.
+
+        Args:
+            frame_idx (int): Index of the frame to load.
+
+        Returns:
+            dict: A dictionary where keys are object IDs and values are binary masks.
+
+        """
+        # Correct the logic for loading masks
+        
+        
+        mask = np.random.randint(0, 2, size=(512, 512))
+
+        # For each mask, select the specific mask for that
+        binary_segments = {}
+        binary_segments[1] = torch.from_numpy(mask)
+
+        # print(f'Here are the classes {binary_segments.keys()}')
+
+        return binary_segments
