@@ -2,7 +2,6 @@ from sam2.modeling.sam2_base import SAM2Base
 from omegaconf import OmegaConf
 from hydra.utils import instantiate
 
-cfg = OmegaConf.create(yaml_config)
+config = OmegaConf.load("/scratch_net/ken/radjoe/Projects/SourceCode/MedSAM2/sam2/configs/test_config.yaml")
 
-# Instantiate the model
-model = instantiate(cfg.model)
+model = instantiate(config.trainer.model)

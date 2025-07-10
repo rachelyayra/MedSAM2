@@ -4,7 +4,7 @@ scratch:
   resolution: 512
   train_video_batch_size: 1
   num_train_workers: 15
-  num_frames: 1
+  num_frames: 16
   max_num_objects: 5
   base_lr: 5.0e-5
   vision_lr: 3.0e-06
@@ -212,14 +212,14 @@ trainer:
     multimask_output_for_tracking: true
     use_multimask_token_for_obj_ptr: true
     multimask_min_pt_num: 0
-    multimask_max_pt_num: 2
+    multimask_max_pt_num: 1
     use_mlp_for_obj_ptr_proj: true
     # Compilation flag
     # compile_image_encoder: False
 
     ####### Training specific params #######
     # box/point input and corrections
-    prob_to_use_pt_input_for_train: 1.0
+    prob_to_use_pt_input_for_train: 0.5
     prob_to_use_pt_input_for_eval: 0.0
     prob_to_use_box_input_for_train: 1.0 
     prob_to_use_box_input_for_eval: 0.0
