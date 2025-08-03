@@ -39,6 +39,7 @@ class SAM2VideoPredictorNPZ(SAM2Base):
         self.clear_non_cond_mem_around_input = clear_non_cond_mem_around_input
         self.clear_non_cond_mem_for_multi_obj = clear_non_cond_mem_for_multi_obj
         self.add_all_frames_to_correct_as_cond = add_all_frames_to_correct_as_cond
+        self.pred_option = True
 
     @torch.inference_mode()
     def init_state(
@@ -741,7 +742,7 @@ class SAM2VideoPredictorNPZ(SAM2Base):
                 inference_state, frame_idx, current_out, storage_key
             )
             inference_state["frames_already_tracked"][frame_idx] = {"reverse": reverse}
-
+            print(f'Print the pred_masks: {pred_masks.shape}')
             # Resize the output mask to the original video resolution (we directly use
             # the mask scores on GPU for output to avoid any CPU conversion in between)
             _, video_res_masks = self._get_orig_video_res_output(

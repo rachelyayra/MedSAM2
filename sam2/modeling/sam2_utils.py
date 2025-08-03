@@ -16,6 +16,7 @@ import torch.nn.functional as F
 from sam2.utils.misc import mask_to_box
 
 
+
 def select_closest_cond_frames(frame_idx, cond_frame_outputs, max_cond_frame_num):
     """
     Select up to `max_cond_frame_num` conditioning frames from `cond_frame_outputs`
@@ -155,6 +156,7 @@ class LayerNorm2d(nn.Module):
 
 def sample_box_points(
     masks: torch.Tensor,
+    img_ids: torch.Tensor,
     noise: float = 0.1,  # SAM default
     noise_bound: int = 20,  # SAM default
     top_left_label: int = 2,
@@ -172,8 +174,28 @@ def sample_box_points(
     - box_coords: [B, num_pt, 2], contains (x, y) coordinates of top left and bottom right box corners, dtype=torch.float
     - box_labels: [B, num_pt], label 2 is reserverd for top left and 3 for bottom right corners, dtype=torch.int32
     """
+    # print(f'The batch size of masks: {masks.shape}')
+    # for i in range(len(masks)):
+    #     print(f'shape: {masks[i].shape, torch.unique(masks[i])}')
+    #     save_image(masks[i].float(), f'separate_out_{i}.png') 
     device = masks.device
+    masks_grouped = masks.view(-1, 3, *masks.shape[1:])  # Group every 3
+
+    # Sum across the grouped dimension (dim=1)
+    masks = torch.sum(masks_grouped, dim=1)  # Result shape: (N//3, H, W)
+    # print(f'the mask {masks.shape}')
+    masks =  masks > 0  
+    # masks = masks.unsqueeze(1)
+    # print(f'The batch size of masks: {masks.shape}')
+    # np_image = masks.cpu().detach().numpy()
+    # for i in range(len(masks)):
+    #     print(f'shape: {masks[i].shape, torch.unique(masks[i])}')
+    #     save_image(masks[i].float(), f'output_{i}.png') 
+
     box_coords = mask_to_box(masks)
+    # print(f'Box Coords {box_coords}')
+
+    # print(f'The Boxes before encoding: {box_coords.shape}')
     B, _, H, W = masks.shape
     box_labels = torch.tensor(
         [top_left_label, bottom_right_label], dtype=torch.int, device=device
@@ -213,8 +235,10 @@ def sample_random_points_from_errors(gt_masks, pred_masks, num_pt=1):
     - labels: [B, num_pt], dtype=torch.int32, where 1 means positive clicks and 0 means
       negative clicks
     """
+ 
     if pred_masks is None:  # if pred_masks is not provided, treat it as empty
         pred_masks = torch.zeros_like(gt_masks)
+    # print(f'This is done as a forward sam {gt_masks.shape, pred_masks.shape}')
     assert gt_masks.dtype == torch.bool and gt_masks.size(1) == 1
     assert pred_masks.dtype == torch.bool and pred_masks.shape == gt_masks.shape
     assert num_pt >= 0
@@ -266,8 +290,18 @@ def sample_one_point_from_error_center(gt_masks, pred_masks, padding=True):
     """
     import cv2
 
+    # print(f'print {gt_masks.shape}')
+    # masks_grouped = gt_masks.view(-1, 3, *gt_masks.shape[2:])  # Group every 3
+
+    # # Sum across the grouped dimension (dim=1)
+    # gt_masks = torch.sum(masks_grouped, dim=1)  # Result shape: (N//3, H, W)
+    
+    # gt_masks =  gt_masks > 0  
+    # masks = masks.unsqueeze(1)
+    # print(f'The batch size of masks: {masks.shape}')
     if pred_masks is None:
         pred_masks = torch.zeros_like(gt_masks)
+    # print(f'Gt mask shape: {gt_masks.shape, gt_masks.dtype}')
     assert gt_masks.dtype == torch.bool and gt_masks.size(1) == 1
     assert pred_masks.dtype == torch.bool and pred_masks.shape == gt_masks.shape
 
@@ -321,3 +355,89 @@ def get_next_point(gt_masks, pred_masks, method):
         return sample_one_point_from_error_center(gt_masks, pred_masks)
     else:
         raise ValueError(f"unknown sampling method {method}")
+
+
+def get_points_from_box(
+    masks: torch.Tensor,
+    predictor,
+    image_embedding,
+    noise: float = 0.1,  # SAM default
+    noise_bound: int = 20,  # SAM default
+    top_left_label: int = 2,
+    bottom_right_label: int = 3,
+    num_points: int = 100,
+) -> Tuple[np.ndarray, np.ndarray]:
+    device = masks.device
+    batch_size = masks.shape[0]
+
+    # 1. Get bounding boxes for all masks: shape [B, 4]
+    box_coords = mask_to_box(masks)  # shape: [B, 4]
+
+    all_selected_points = []
+    all_selected_labels = []
+
+    for i in range(batch_size):
+        box = box_coords[i]  # [x1, y1, x2, y2]
+
+        # 2. Sample noisy points inside the box (you implement this)
+        sampled_points = get_points_from_box(
+            box.cpu().numpy(), num_points, noise, noise_bound
+        )  # shape: [num_points, 2], numpy array of (x,y)
+
+        # 3. Get features for these points from your embedding / feature map
+        # You need to implement this function according to your model's embeddings
+        grid = grid.view(1, -1, 1, 2)
+        features = F.grid_sample(image_embedding, grid, mode='bilinear', align_corners=True)  # shape: [num_points, feature_dim]
+
+        # 4. Feed features into predictor to get class logits and selection scores
+        class_logits, selection_scores = predictor(features)  
+        # class_logits: [num_points, num_classes], selection_scores: [num_points]
+
+        # 5. Select points based on selection scores threshold (e.g. 0.5)
+        selected_mask = selection_scores > 0.5
+        selected_points = sampled_points[selected_mask.cpu().numpy()]
+        selected_logits = class_logits[selected_mask]
+
+        # 6. Get predicted class for each selected point
+        selected_labels = torch.argmax(selected_logits, dim=1).cpu().numpy()
+
+        all_selected_points.append(selected_points)
+        all_selected_labels.append(selected_labels)
+
+    # Concatenate all points and labels from batch
+    all_selected_points = np.concatenate(all_selected_points, axis=0)
+    all_selected_labels = np.concatenate(all_selected_labels, axis=0)
+
+    return all_selected_points, all_selected_labels
+
+
+def get_points_from_box(box: np.ndarray, num_points: int, noise: float, noise_bound: int) -> np.ndarray:
+    """
+    Sample points uniformly inside the box with some noise
+    box: [x1, y1, x2, y2]
+    Returns: (num_points, 2) array of points (x, y)
+    """
+    x1, y1, x2, y2 = box
+    xs = np.random.uniform(x1, x2, size=num_points)
+    ys = np.random.uniform(y1, y2, size=num_points)
+
+    # Add noise, clipped to noise_bound
+    xs += np.clip(np.random.normal(scale=noise*max(x2-x1,1)), -noise_bound, noise_bound)
+    ys += np.clip(np.random.normal(scale=noise*max(y2-y1,1)), -noise_bound, noise_bound)
+
+    points = np.stack([xs, ys], axis=1)
+    # Clip points to be inside box
+    points[:, 0] = np.clip(points[:, 0], x1, x2)
+    points[:, 1] = np.clip(points[:, 1], y1, y2)
+
+    return points
+
+def get_features(points: np.ndarray, device) -> torch.Tensor:
+    """
+    Given points coordinates, get the corresponding features from your image embedding or feature map.
+    This is a placeholder you need to implement depending on how your image embedding is stored.
+    For example, if embedding is a tensor of shape [C, H, W], you can sample/interpolate features at points.
+    """
+    # Placeholder: return random tensor for now
+    feature_dim = 256  # example
+    return torch.randn(len(points), feature_dim, device=device)

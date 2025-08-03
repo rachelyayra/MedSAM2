@@ -6,10 +6,10 @@ scratch:
   num_train_workers: 0
   num_frames: 8
   max_num_objects: 5
-  base_lr: 5.0e-2
-  vision_lr: 3.0e-2
+  base_lr: 5.0e-5
+  vision_lr: 3.0e-5
   phases_per_epoch: 1
-  num_epochs: 500
+  num_epochs: 1000
 
 # Video transforms
 
@@ -21,6 +21,7 @@ dataset:
   val_gt_folder: /scratch_net/ken/radjoe/BraTS/Validation/labels_UNN  # PATH to MOSE Annotations folder
   file_list_txt: null
   multiplier: 1
+
 # Video transforms
 vos:
   train_transforms:
@@ -220,7 +221,7 @@ trainer:
 
     ####### Training specific params #######
     # box/point input and corrections
-    prob_to_use_pt_input_for_train: 1.0
+    prob_to_use_pt_input_for_train: 0.5
     prob_to_use_pt_input_for_eval: 1.0
     prob_to_use_box_input_for_train: 1.0 
     prob_to_use_box_input_for_eval: 1.0
@@ -232,7 +233,7 @@ trainer:
     # maximum 2 initial conditioning frames
     num_init_cond_frames_for_train: 1
     rand_init_cond_frames_for_train: True  # random 1~2
-    num_correction_pt_per_frame: 1
+    num_correction_pt_per_frame: 7
     use_act_ckpt_iterative_pt_sampling: false
     
 
@@ -357,11 +358,11 @@ trainer:
 
   loss:
     all:
-      _target_: training.loss_fns.MultiStepMultiMasksAndIous
+      _target_: training.loss_fns.MultiStepSingleMasksAndIous
       weight_dict:
-        loss_mask: 1
-        loss_dice: 1
-        loss_iou: 1
+        loss_mask: 20
+        loss_dice: 10
+        loss_iou: 0
         loss_class: 1
       supervise_all_iou: true
       iou_use_l1_loss: true

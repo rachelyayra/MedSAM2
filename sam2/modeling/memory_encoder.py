@@ -170,6 +170,7 @@ class MemoryEncoder(nn.Module):
         ## Fuse pix_feats and downsampled masks
         # in case the visual features are on CPU, cast them to CUDA
         pix_feat = pix_feat.to(masks.device)
+        # print(f'the pixel feature: {pix_feat.shape}, masks: {masks.shape}')
 
         x = self.pix_feat_proj(pix_feat)
         x = x + masks
@@ -177,5 +178,5 @@ class MemoryEncoder(nn.Module):
         x = self.out_proj(x)
 
         pos = self.position_encoding(x).to(x.dtype)
-
+        # print(f'the encoded memory: {x.shape}, position: {pos.shape}')
         return {"vision_features": x, "vision_pos_enc": [pos]}

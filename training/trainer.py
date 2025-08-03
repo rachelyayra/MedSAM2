@@ -49,6 +49,7 @@ from training.utils.train_utils import (
     MemMeter,
     Phase,
     ProgressMeter,
+    EarlyStopper,
     set_seeds,
     setup_distributed_backend,
 )
@@ -165,6 +166,9 @@ class Trainer:
         meters: Optional[Dict[str, Any]] = None,
         loss: Optional[Dict[str, Any]] = None,
     ):
+        # info dict
+        self.early_stopping = EarlyStopper()
+        self.stop_early = False
 
         self._setup_env_variables(env_variables)
         self._setup_timers()
@@ -188,6 +192,10 @@ class Trainer:
         self._setup_device(accelerator)
 
         self._setup_torch_dist_and_backend(cuda, distributed)
+
+        self.trainables = 0.0
+        self.non_trainables = 0.0
+        self.totals = 0.0
 
         makedir(self.logging_conf.log_dir)
         setup_logging(
@@ -453,8 +461,9 @@ class Trainer:
         model: nn.Module,
         phase: str,
     ):
-
+        
         outputs = model(batch)
+        # print(f'batch size {batch.img_batch.shape, len(outputs), len(outputs[0])}')
         targets = batch.masks
         batch_size = len(batch.img_batch)
 
@@ -507,6 +516,7 @@ class Trainer:
                     self.epoch -= 1
                     self.run_val()
                     self.epoch += 1
+
             self.run_train()
             self.run_val()
         elif self.mode == "val":
@@ -529,7 +539,7 @@ class Trainer:
         while self.epoch < self.max_epochs:
             dataloader = self.train_dataset.get_loader(epoch=int(self.epoch))
             barrier()
-            outs = self.train_epoch(dataloader)
+            outs, assessments = self.train_epoch(dataloader)
             self.logger.log_dict(outs, self.epoch)  # Logged only on rank 0
 
             # log train to text file.
@@ -539,6 +549,11 @@ class Trainer:
                     "a",
                 ) as f:
                     f.write(json.dumps(outs) + "\n")
+                with g_pathmgr.open(
+                    os.path.join(self.logging_conf.log_dir, "assessment_stats.json"),
+                    "a",
+                ) as f:
+                    f.write(json.dumps(assessments) + "\n")
 
             # Save checkpoint before validating
             self.save_checkpoint(self.epoch + 1)
@@ -560,12 +575,29 @@ class Trainer:
                     f.write(json.dumps(self.best_meter_values) + "\n")
 
             self.epoch += 1
+            
+            if self.stop_early:
+                # Log time to converge
+                
+                if self.distributed_rank == 0:
+                    self.best_meter_values.update(self._get_trainer_state("train"))
+                    with g_pathmgr.open(
+                        os.path.join(self.logging_conf.log_dir, "conv_stats.json"),
+                        "a",
+                    ) as f:
+                        f.write(json.dumps(self.time_elapsed_meter.val) + "\n")
+
+                break
+                
+
         # epoch was incremented in the loop but the val step runs out of the loop
         self.epoch -= 1
+        
 
     def run_val(self):
         dataloader = self.val_dataset.get_loader(epoch=int(self.epoch))
         outs = self.val_epoch(dataloader, phase=Phase.VAL)
+        self.stop_early = self.early_stopping.early_stop(outs['Losses/val_all_loss'])
         del dataloader
         gc.collect()
         self.logger.log_dict(outs, self.epoch)  # Logged only on rank 0
@@ -698,7 +730,7 @@ class Trainer:
         }
 
     def train_epoch(self, train_loader):
-
+        
         # Init stat meters
         batch_time_meter = AverageMeter("Batch Time", self.device, ":.2f")
         data_time_meter = AverageMeter("Data Time", self.device, ":.2f")
@@ -817,8 +849,11 @@ class Trainer:
             # Catching NaN/Inf errors in the loss
             except FloatingPointError as e:
                 raise e
-
+        # Log batch time
+        assessment_info = dict()
         self.est_epoch_time[Phase.TRAIN] = batch_time_meter.avg * iters_per_epoch
+        assessment_info[f'epoch_train_time{self.epoch}'] = self.est_epoch_time[Phase.TRAIN]
+        assessment_info[f'epoch_mem_{self.epoch}'] = mem_meter.peak
         self._log_timers(Phase.TRAIN)
         self._log_sync_data_times(Phase.TRAIN, data_times)
 
@@ -831,7 +866,7 @@ class Trainer:
         out_dict.update(self._get_trainer_state(phase))
         logging.info(f"Losses and meters: {out_dict}")
         self._reset_meters([phase])
-        return out_dict
+        return out_dict , assessment_info
 
     def _log_sync_data_times(self, phase, data_times):
         data_times = all_reduce_max(torch.tensor(data_times)).tolist()
@@ -882,7 +917,10 @@ class Trainer:
                 return
 
         self.scaler.scale(loss).backward()
-        loss_mts[loss_key].update(loss.item(), batch_size)
+        for name, param in self.model.named_parameters():
+            if param.requires_grad and param.grad is None:
+                # print(f"Expected grad missing for {name}")
+                loss_mts[loss_key].update(loss.item(), batch_size)
         for extra_loss_key, extra_loss in extra_losses.items():
             if extra_loss_key not in extra_loss_mts:
                 extra_loss_mts[extra_loss_key] = AverageMeter(
@@ -997,6 +1035,7 @@ class Trainer:
         self.logger = Logger(self.logging_conf)
 
         self.model = instantiate(self.model_conf, _convert_="all")
+        
         print_model_summary(self.model)
 
         self.loss = None
@@ -1042,6 +1081,9 @@ class Trainer:
                 self.logger.log(log_str, loss[k], step)
         return core_loss
 
+    def is_converged(self):
+        return
+
 
 def print_model_summary(model: torch.nn.Module, log_dir: str = ""):
     """
@@ -1060,6 +1102,7 @@ def print_model_summary(model: torch.nn.Module, log_dir: str = ""):
     )
     total_parameters = sum(p.numel() for p in model.parameters(**param_kwargs))
     non_trainable_parameters = total_parameters - trainable_parameters
+    
     logging.info("==" * 10)
     logging.info(f"Summary for model {type(model)}")
     logging.info(f"Model is {model}")
@@ -1076,7 +1119,7 @@ def print_model_summary(model: torch.nn.Module, log_dir: str = ""):
         output_fpath = os.path.join(log_dir, "model.txt")
         with g_pathmgr.open(output_fpath, "w") as f:
             print(model, file=f)
-
+    return get_human_readable_count(total_parameters), get_human_readable_count(trainable_parameters), get_human_readable_count(non_trainable_parameters)
 
 PARAMETER_NUM_UNITS = [" ", "K", "M", "B", "T"]
 
@@ -1115,3 +1158,4 @@ def get_human_readable_count(number: int) -> str:
         return f"{int(number):,d} {labels[index]}"
     else:
         return f"{number:,.1f} {labels[index]}"
+

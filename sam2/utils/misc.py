@@ -311,7 +311,7 @@ def load_video_frames_from_npy_files(
     img_std = torch.tensor(img_std, dtype=torch.float32)[:, None, None]
 
     images = np.load(video_path)
-    print(f'Image shape{images.shape}')
+    # print(f'Image shape{images.shape}')
   
     images = np.delete(images, 1, axis=0)
     for i in range(images.shape[0]):
@@ -321,9 +321,9 @@ def load_video_frames_from_npy_files(
     images = torch.permute(images, (3, 0, 1, 2))
     video_height = images.shape[2]
     video_width = images.shape[3]
-    print(f'This this {torch.unique(images)}')
+    # print(f'This this {torch.unique(images)}')
     images = F.interpolate(images, size=(image_size, image_size), mode='bilinear', align_corners=False)
-    print(f'This this {torch.unique(images)}')
+    # print(f'This this {torch.unique(images)}')
 
 
     if not offload_video_to_cpu:
@@ -404,6 +404,7 @@ def concat_points(old_point_inputs, new_points, new_labels):
     if old_point_inputs is None:
         points, labels = new_points, new_labels
     else:
+        # print(f'the point coords {old_point_inputs["point_coords"].shape, new_points.shape }')
         points = torch.cat([old_point_inputs["point_coords"], new_points], dim=1)
         labels = torch.cat([old_point_inputs["point_labels"], new_labels], dim=1)
 

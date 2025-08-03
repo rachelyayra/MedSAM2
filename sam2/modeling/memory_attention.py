@@ -73,7 +73,7 @@ class MemoryAttentionLayer(nn.Module):
         tgt2 = self.norm2(tgt)
         tgt2 = self.cross_attn_image(
             q=tgt2 + query_pos if self.pos_enc_at_cross_attn_queries else tgt2,
-            k=memory + pos if self.pos_enc_at_cross_attn_keys else memory,
+            k=memory +  memory,
             v=memory,
             **kwds,
         )

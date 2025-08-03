@@ -281,6 +281,7 @@ class Hiera(nn.Module):
         return pos_embed
 
     def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
+        # print(f'Shape of input: {x.shape}')
         x = self.patch_embed(x)
         # x: (B, H, W, C)
 

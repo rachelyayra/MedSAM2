@@ -88,8 +88,10 @@ class PatchEmbed(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # print(f'the thing {x.shape}')
         x = self.proj(x)
         # B C H W -> B H W C
+        # print(f'the thing {x.shape}')
         x = x.permute(0, 2, 3, 1)
         return x
 
