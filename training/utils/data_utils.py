@@ -213,35 +213,133 @@ def collate_fn(
         batch_size=[T],
     )
 
+def collate_fn_tta(
+    batch: List[VideoDatapoint],
+    dict_key,
+) -> BatchedVideoDatapoint:
+    """
+    Args:
+        batch: A list of VideoDatapoint instances.
+        dict_key (str): A string key used to identify the batch.
+    """
+    img_batch = []
+    for total_set in batch:
+        video = total_set[0]
+        img_batch += [torch.stack([frame.data for frame in video.frames], dim=0)]
+
+    img_batch = torch.stack(img_batch, dim=0).permute((1, 0, 2, 3, 4))
+    T = img_batch.shape[0]
+    # Prepare data structures for sequential processing. Per-frame processing but batched across videos.
+    step_t_objects_identifier = [[] for _ in range(T)]
+    step_t_frame_orig_size = [[] for _ in range(T)]
+
+    step_t_masks = [[] for _ in range(T)]
+    step_t_obj_to_frame_idx = [
+        [] for _ in range(T)
+    ]  # List to store frame indices for each time step
+
+    standard_idx = [i for i in range(1,4)]
+    for video_idx, total_set in enumerate(batch):
+        # print(f'length of tuple {total_set[0]}')
+        video = total_set[0]
+        orig_video_id = video.video_id
+        orig_frame_size = video.size
+        
+        for t, frame in enumerate(video.frames):
+            temp_obj_id = []
+            temp_seg = []
+            objects = frame.objects
+            for obj in objects:
+                # print(f'Objects: {obj}')
+                orig_obj_id = obj.object_id
+                temp_obj_id.append(orig_obj_id)
+
+                orig_frame_idx = obj.frame_index
+                step_t_obj_to_frame_idx[t].append(
+                    torch.tensor([t, video_idx], dtype=torch.int)
+                )
+                
+                step_t_objects_identifier[t].append(
+                    torch.tensor([orig_video_id, orig_obj_id, orig_frame_idx])
+                )
+                step_t_frame_orig_size[t].append(torch.tensor(orig_frame_size))
+                temp_seg.append(obj.segment.to(torch.bool))
+            # Rearrange in a started order
+            sorted_indices = sorted(range(len(temp_obj_id)), key=lambda i: temp_obj_id[i])
+
+            # Rearrange values and masks using the sorted indices
+            sorted_values = [temp_obj_id[i] for i in sorted_indices]
+            sorted_masks = [temp_seg[i] for i in sorted_indices]
+
+            standard_idx = set(standard_idx)
+
+            temp_id = set(sorted_values)
+
+            not_common = list(standard_idx.symmetric_difference(temp_id))
+
+            temp_mask =  torch.zeros([512, 512])
+            for i in not_common:
+                sorted_masks.insert(i, temp_mask)
+            for i in sorted_masks:
+                step_t_masks[t].append(i)
 
 
+    # print(f'This is the size of moasks { len(step_t_masks[t])}')
+            # print(f'the object id per frame{step_t_obj_to_frame_idx}')
+    obj_to_frame_idx = torch.stack(
+        [
+            torch.stack(obj_to_frame_idx, dim=0)
+            for obj_to_frame_idx in step_t_obj_to_frame_idx
+        ],
+        dim=0,
+    )
+    # Keep the masks dimensions consistent.
+    masks = torch.stack([torch.stack(masks, dim=0) for masks in step_t_masks], dim=0)
+    objects_identifier = torch.stack(
+        [torch.stack(id, dim=0) for id in step_t_objects_identifier], dim=0
+    )
+    frame_orig_size = torch.stack(
+        [torch.stack(id, dim=0) for id in step_t_frame_orig_size], dim=0
+    )
+    return BatchedVideoDatapoint(
+        img_batch=img_batch,
+        obj_to_frame_idx=obj_to_frame_idx,
+        masks=masks,
+        metadata=BatchedVideoMetaData(
+            unique_objects_identifier=objects_identifier,
+            frame_orig_size=frame_orig_size,
+        ),
+        dict_key=dict_key,
+        batch_size=[T],
+    ),  total_set[1], total_set[2]
 
-def mask_to_points(mask):
-      random.seed(42)
-      mask = (mask == 255).to(torch.uint8)
-      ys, xs = np.where(mask == 1)
-      num_points = len(xs)
-      yn , xn = np.where(mask == 0)
-      n_points = len(xn)
 
-      indices_n = random.sample(range(n_points), 5)
+# def mask_to_points(mask):
+#       random.seed(42)
+#       mask = (mask == 255).to(torch.uint8)
+#       ys, xs = np.where(mask == 1)
+#       num_points = len(xs)
+#       yn , xn = np.where(mask == 0)
+#       n_points = len(xn)
 
-      unsampled_points = [(xn[i], yn[i]) for i in indices_n]
+#       indices_n = random.sample(range(n_points), 5)
 
-      if num_points == 0:
-            sampled_points = [(-1, -1)] * 5  # No points at all
-      elif num_points < 5:
-            indices = random.sample(range(num_points), num_points)
-            sampled_points = [(xs[i], ys[i]) for i in indices]
-            # Pad with -1s
-            sampled_points += [(-1, -1)] * (5 - len(sampled_points))
-      else:
-            indices = random.sample(range(num_points), 5)
-            sampled_points = [(xs[i], ys[i]) for i in indices]
+#       unsampled_points = [(xn[i], yn[i]) for i in indices_n]
 
-      results = sampled_points + unsampled_points
+#       if num_points == 0:
+#             sampled_points = [(-1, -1)] * 5  # No points at all
+#       elif num_points < 5:
+#             indices = random.sample(range(num_points), num_points)
+#             sampled_points = [(xs[i], ys[i]) for i in indices]
+#             # Pad with -1s
+#             sampled_points += [(-1, -1)] * (5 - len(sampled_points))
+#       else:
+#             indices = random.sample(range(num_points), 5)
+#             sampled_points = [(xs[i], ys[i]) for i in indices]
+
+#       results = sampled_points + unsampled_points
       
-      return results
+#       return results
 
 # class MRIDataset(Dataset):
 #       def __init__(self, video_folder, label_folder, img_list=None):

@@ -1,8 +1,20 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
+import logging
 
-# This source code is licensed under the license found in the
-# LICENSE file in the root directory of this source tree.
+import numpy as np
+import torch
+import torch.distributed
+from sam2.modeling.sam2_base import SAM2Base
+from sam2.modeling.sam2_utils import (
+    get_1d_sine_pe,
+    get_next_point,
+    sample_box_points,
+    select_closest_cond_frames,
+    get_points_from_box,
+)
+
+from sam2.utils.misc import concat_points
+
+from training.model.sam2 import SAM2Train
 
 import warnings
 from collections import OrderedDict
@@ -13,10 +25,11 @@ from tqdm import tqdm
 
 from sam2.modeling.sam2_base import NO_OBJ_SCORE, SAM2Base
 from sam2.utils.misc import concat_points, fill_holes_in_mask_scores, load_video_frames
+from torchvision.ops import masks_to_boxes
+import torch.nn.functional as F
 
-
-class SAM2VideoPredictorNPZ(SAM2Base):
-    """The predictor class to handle user interactions and manage inference states."""
+class SAM2TestTime(SAM2Train):
+    """The predictor class to handle TTA for both batched and non batched interactions."""
 
     def __init__(
         self,
@@ -41,12 +54,59 @@ class SAM2VideoPredictorNPZ(SAM2Base):
         self.add_all_frames_to_correct_as_cond = add_all_frames_to_correct_as_cond
         self.pred_option = True
 
+    def image_conversion(self, videos, image_size):
+        images = []
+        for frame in videos.frames:
+            images.append(frame.data)
+        images = np.stack(images)
+        images = torch.from_numpy(images)
+        resized_img = F.interpolate(images, size=(image_size, image_size), mode='bilinear', align_corners=False)
+        return resized_img, images.shape[2], images.shape[3]
+
+    def mask_bbox(self, label):
+            print(f'print shape: {label.shape}')
+            from torchvision.utils import save_image
+
+            if not isinstance(label, torch.Tensor):
+                  label = torch.tensor(label[1:])
+            for i in range(len(label)):
+                save_image(label[i, :, :, 80], f'/scratch_net/ken/radjoe/Projects/Experiments/SAMEXP/output_{i}.png')
+            print(f'The original shape of label: {label.shape}')
+            label = label.sum(dim=0)
+            print(f'The shape of label: {label.unique()}')
+            
+            # Find the best slice
+
+            label_counts = (label != 0).sum(dim=(0, 1))  
+            print(f'label counts: {label_counts}')
+            # Get index of the slice with the most label pixels
+            best_slice = torch.argmax(label_counts)
+            # bbox = []
+            points = []
+            mask = label[ :, :, best_slice]
+            if torch.all(mask == 0):
+                        box = torch.tensor([[0.0, 0.0, 0.0, 0.0]])
+            else:
+                        box = masks_to_boxes(mask.unsqueeze(0))
+                        # point = mask_to_points(mask)
+            
+            # points.append(point)
+
+            return box, best_slice
+
+    def mask_conversion(self, videos, segment):
+        
+        mask = segment.load_mask()
+        box, best_slice = self.mask_bbox(mask)
+        mask_shape = mask[1:].shape
+    
+        return box, best_slice, mask_shape
+    
     @torch.inference_mode()
     def init_state(
         self,
-        #video_path,
         # added below
-        video_path,
+        video_path = None,
         images = None,
         video_height = None,
         video_width = None,
@@ -56,13 +116,17 @@ class SAM2VideoPredictorNPZ(SAM2Base):
     ):
         """Initialize an inference state."""
         compute_device = self.device  # device of the model
-        images, video_height, video_width = load_video_frames(
-            video_path=video_path,
-            image_size=self.image_size,
-            offload_video_to_cpu=offload_video_to_cpu,
-            async_loading_frames=async_loading_frames,
-            compute_device=compute_device,
-        )
+        if video_path is not None:
+            images, video_height, video_width = load_video_frames(
+                video_path=video_path,
+                image_size=self.image_size,
+                offload_video_to_cpu=offload_video_to_cpu,
+                async_loading_frames=async_loading_frames,
+                compute_device=compute_device,
+            )
+        else: 
+            images, video_height, video_width = self.image_conversion(images, self.image_size )
+
         inference_state = {}
         inference_state["images"] = images
         inference_state["num_frames"] = len(images)
@@ -174,6 +238,39 @@ class SAM2VideoPredictorNPZ(SAM2Base):
     def _get_obj_num(self, inference_state):
         """Get the total number of unique object ids received so far in this session."""
         return len(inference_state["obj_idx_to_id"])
+    
+    @torch.inference_mode()
+    def predict(self, videos, segment):
+        # select the best frame and box for prediction
+        self.training = False
+        inference_state = self.init_state(images= videos)
+        box, frames, label_shape = self.mask_conversion(videos, segment)
+        self.add_new_points_or_box(
+                            inference_state=inference_state,
+                            frame_idx=frames,
+                            obj_id=0,
+                            box = box,
+        )
+        video_segments = {}  # video_segments contains the per-frame segmentation results
+ 
+            
+        for out_frame_idx, out_obj_ids, out_mask_logits in self.propagate_in_video(inference_state):
+                # print(out_frame_idx)
+                
+                video_segments[out_frame_idx] = {
+                    out_obj_id: (out_mask_logits[i] > 0.0).cpu().numpy()
+                    for i, out_obj_id in enumerate(out_obj_ids)
+                }
+
+        for out_frame_idx, out_obj_ids, out_mask_logits in self.propagate_in_video(inference_state, reverse = True):
+                # print(out_frame_idx)
+                
+                video_segments[out_frame_idx] = {
+                    out_obj_id: (out_mask_logits[i] > 0.0).cpu().numpy()
+                    for i, out_obj_id in enumerate(out_obj_ids)
+                }
+                
+        return video_segments, label_shape
 
     @torch.inference_mode()
     def add_new_points_or_box(
@@ -586,7 +683,7 @@ class SAM2VideoPredictorNPZ(SAM2Base):
         ) = self._get_image_feature(inference_state, frame_idx, batch_size)
 
         # Feed the empty mask and image feature above to get a dummy object pointer
-        current_out = self.track_step(
+        current_out = self.pred_track_step(
             frame_idx=frame_idx,
             is_init_cond_frame=True,
             current_vision_feats=current_vision_feats,
@@ -947,7 +1044,7 @@ class SAM2VideoPredictorNPZ(SAM2Base):
 
         # point and mask should not appear as input simultaneously on the same frame
         assert point_inputs is None or mask_inputs is None
-        current_out = self.track_step(
+        current_out = self.pred_track_step(
             frame_idx=frame_idx,
             is_init_cond_frame=is_init_cond_frame,
             current_vision_feats=current_vision_feats,
@@ -1184,3 +1281,74 @@ class SAM2VideoPredictorNPZ(SAM2Base):
             for obj_output_dict in inference_state["output_dict_per_obj"].values():
                 obj_output_dict["non_cond_frame_outputs"].pop(t, None)
 
+    def pred_track_step(
+        self,
+        frame_idx,
+        is_init_cond_frame,
+        current_vision_feats,
+        current_vision_pos_embeds,
+        feat_sizes,
+        point_inputs,
+        mask_inputs,
+        output_dict,
+        num_frames,
+        track_in_reverse=False,  # tracking in reverse time order (for demo usage)
+        # Whether to run the memory encoder on the predicted masks. Sometimes we might want
+        # to skip the memory encoder with `run_mem_encoder=False`. For example,
+        # in demo we might call `track_step` multiple times for each user click,
+        # and only encode the memory when the user finalizes their clicks. And in ablation
+        # settings like SAM training on static images, we don't need the memory encoder.
+        run_mem_encoder=True,
+        # The previously predicted SAM mask logits (which can be fed together with new clicks in demo).
+        prev_sam_mask_logits=None,
+    ):  
+        print(f'The pred option: {self.pred_option}')
+        current_out, sam_outputs, _, _ = self._track_step(
+            frame_idx,
+            is_init_cond_frame,
+            current_vision_feats,
+            current_vision_pos_embeds,
+            feat_sizes,
+            point_inputs,
+            mask_inputs,
+            output_dict,
+            num_frames,
+            track_in_reverse,
+            prev_sam_mask_logits,
+            pred_option=self.pred_option,
+        )
+
+        (
+            _,
+            _,
+            _,
+            low_res_masks,
+            high_res_masks,
+            obj_ptr,
+            object_score_logits,
+        ) = sam_outputs
+
+        print(f'The pred mask shapes: {low_res_masks.shape}')
+        current_out["pred_masks"] = low_res_masks
+        current_out["pred_masks_high_res"] = high_res_masks
+        current_out["obj_ptr"] = obj_ptr
+        print(f'TRAINING: {self.training}')
+        if not self.training:
+            # Only add this in inference (to avoid unused param in activation checkpointing;
+            # it's mainly used in the demo to encode spatial memories w/ consolidated masks)
+            current_out["object_score_logits"] = object_score_logits
+
+        # Finally run the memory encoder on the predicted mask to encode
+        # it into a new memory feature (that can be used in future frames)
+        self._encode_memory_in_output(
+            current_vision_feats,
+            feat_sizes,
+            point_inputs,
+            run_mem_encoder,
+            high_res_masks,
+            object_score_logits,
+            current_out,
+            pred_option= self.pred_option
+        )
+
+        return current_out

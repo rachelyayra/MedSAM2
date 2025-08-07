@@ -67,12 +67,13 @@ class SAM2Train(SAM2Base):
         # of all frames at once. This avoids backbone OOM errors on very long videos in evaluation, but could be slightly slower.
         forward_backbone_per_frame_for_eval=False,
         freeze_image_encoder=False,
+        freeze_all=False,
         **kwargs,
     ):
         super().__init__(image_encoder, memory_attention, memory_encoder, **kwargs)
         self.use_act_ckpt_iterative_pt_sampling = use_act_ckpt_iterative_pt_sampling
         self.forward_backbone_per_frame_for_eval = forward_backbone_per_frame_for_eval
-
+        self.pred_option = False
         # Point sampler and conditioning frames
         self.prob_to_use_pt_input_for_train = prob_to_use_pt_input_for_train
         self.prob_to_use_box_input_for_train = prob_to_use_box_input_for_train
@@ -104,6 +105,20 @@ class SAM2Train(SAM2Base):
         if freeze_image_encoder:
             for p in self.image_encoder.parameters():
                 p.requires_grad = False
+
+        if freeze_all:
+            # for p in self.image_encoder.parameters():
+            #     p.requires_grad = False
+            # for p in self.sam_mask_decoder.parameters():
+            #     p.requires_grad = False
+            # for p in self.memory_attention.parameters():
+            #     p.requires_grad = False
+            # for p in self.memory_encoder.parameters():
+            #     p.requires_grad = False
+            
+                for name, param in self.sam_mask_decoder.named_parameters():
+                    if name.startswith("decoder_adapter."):
+                        param.requires_grad = False
 
     def forward(self, input: BatchedVideoDatapoint):
 
@@ -456,6 +471,7 @@ class SAM2Train(SAM2Base):
             high_res_masks,
             object_score_logits,
             current_out,
+            
         )
         return current_out
 

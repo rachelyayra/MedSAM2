@@ -378,6 +378,23 @@ class BraTSSegmentLoader:
 
         return binary_segments
 
+    def load_mask(self):
+        """
+        Load the single mask for the given frame index and convert it to binary segments.
+
+        Args:
+            frame_idx (int): Index of the frame to load.
+
+        Returns:
+            dict: A dictionary where keys are object IDs and values are binary masks.
+
+        """
+        # Correct the logic for loading masks
+        
+    
+
+        return self.mask
+
 
 class TestSegmentLoader:
     def __init__(self):

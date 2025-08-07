@@ -30,6 +30,7 @@ class MaskDecoder(nn.Module):
         pred_obj_scores: bool = False,
         pred_obj_scores_mlp: bool = False,
         use_multimask_token_for_obj_ptr: bool = False,
+        use_adapter = False
     ) -> None:
         """
         Predicts masks given an image and prompt embeddings, using a
@@ -106,6 +107,7 @@ class MaskDecoder(nn.Module):
         self.dynamic_multimask_via_stability = dynamic_multimask_via_stability
         self.dynamic_multimask_stability_delta = dynamic_multimask_stability_delta
         self.dynamic_multimask_stability_thresh = dynamic_multimask_stability_thresh
+        self.use_adapter = use_adapter
 
     def forward(
         self,

@@ -54,6 +54,8 @@ from training.utils.train_utils import (
     setup_distributed_backend,
 )
 
+from torchvision.utils import save_image
+
 
 CORE_LOSS_KEY = "core_loss"
 
@@ -463,11 +465,19 @@ class Trainer:
     ):
         
         outputs = model(batch)
-        # print(f'batch size {batch.img_batch.shape, len(outputs), len(outputs[0])}')
+        print(f'batch size {batch.img_batch.shape, len(outputs), len(outputs[0])}')
+        
+
+        # batch size (torch.Size([8, 1, 3, 512, 512]), 8, 13)
         targets = batch.masks
         batch_size = len(batch.img_batch)
 
+        print(f'batch size is checking here')
+        self.log_validation_image(outputs, targets, self.logging_conf.log_dir )
+        print(f'batch size is checking here')
+
         key = batch.dict_key  # key for dataset
+
         loss = self.loss[key](outputs, targets)
         loss_str = f"Losses/{phase}_{key}_loss"
 
@@ -919,7 +929,7 @@ class Trainer:
         self.scaler.scale(loss).backward()
         for name, param in self.model.named_parameters():
             if param.requires_grad and param.grad is None:
-                # print(f"Expected grad missing for {name}")
+                print(f"Expected grad missing for {name}")
                 loss_mts[loss_key].update(loss.item(), batch_size)
         for extra_loss_key, extra_loss in extra_losses.items():
             if extra_loss_key not in extra_loss_mts:
@@ -1081,8 +1091,24 @@ class Trainer:
                 self.logger.log(log_str, loss[k], step)
         return core_loss
 
-    def is_converged(self):
-        return
+    def log_validation_image(self, output, target, savepath):
+        savepaths = f'{savepath}/{self.epoch}'
+        # target = target.squeeze(0)
+        os.makedirs(savepaths,exist_ok=True)
+        for frame_idx in range(len(output)):
+            print(f'This is the frame idx: {frame_idx}')
+            if frame_idx == 0:
+                step_list = output[frame_idx]['multistep_pred_multimasks_high_res']
+                print(f'List of steps: {len(step_list)}')
+                for step_idx in range(len(step_list)):
+                    if step_idx == 0:
+                        pred_save = step_list[step_idx]
+                        print(f'prediction saving: {pred_save.shape, target.shape}')
+                        pred_save = pred_save.squeeze(0)
+                        
+                        for idx in range(len(pred_save)):
+                            save_image(pred_save[idx].float(), f'{savepaths}/pred_{idx}.png') 
+                            save_image(target[frame_idx, idx].float(), f'{savepaths}/gt_{idx}.png') 
 
 
 def print_model_summary(model: torch.nn.Module, log_dir: str = ""):
@@ -1158,4 +1184,3 @@ def get_human_readable_count(number: int) -> str:
         return f"{int(number):,d} {labels[index]}"
     else:
         return f"{number:,.1f} {labels[index]}"
-

@@ -92,6 +92,8 @@ class SAM2Base(torch.nn.Module):
         no_obj_embed_spatial: bool = False,
         # extra arguments used to construct the SAM mask decoder; if not None, it should be a dict of kwargs to be passed into `MaskDecoder` class.
         sam_mask_decoder_extra_args=None,
+
+        use_adapter=False,
         compile_image_encoder: bool = False,
     ):
         super().__init__()
@@ -149,6 +151,7 @@ class SAM2Base(torch.nn.Module):
         self.memory_temporal_stride_for_eval = memory_temporal_stride_for_eval
         # On frames with mask input, whether to directly output the input mask without
         # using a SAM prompt encoder + mask decoder
+        self.use_adapter = use_adapter
         self.use_mask_input_as_output_without_sam = use_mask_input_as_output_without_sam
         self.multimask_output_in_sam = multimask_output_in_sam
         self.multimask_min_pt_num = multimask_min_pt_num
@@ -229,6 +232,7 @@ class SAM2Base(torch.nn.Module):
                 embedding_dim=self.sam_prompt_embed_dim,
                 mlp_dim=2048,
                 num_heads=8,
+                use_adapter = self.use_adapter
             ),
             transformer_dim=self.sam_prompt_embed_dim,
             iou_head_depth=3,
@@ -308,6 +312,7 @@ class SAM2Base(torch.nn.Module):
         device = backbone_features.device
 
         assert backbone_features.size(1) == self.sam_prompt_embed_dim
+        print(backbone_features.size(2),self.sam_image_embedding_size )
         assert backbone_features.size(2) == self.sam_image_embedding_size
         assert backbone_features.size(3) == self.sam_image_embedding_size
 
@@ -854,6 +859,7 @@ class SAM2Base(torch.nn.Module):
                 mask_inputs=mask_inputs,
                 high_res_features=high_res_features,
                 multimask_output=multimask_output,
+                pred_option=pred_option
             )
 
         return current_out, sam_outputs, high_res_features, pix_feat
@@ -867,8 +873,11 @@ class SAM2Base(torch.nn.Module):
         high_res_masks,
         object_score_logits,
         current_out,
+        pred_option = False,
     ):
         if run_mem_encoder and self.num_maskmem > 0:
+            if pred_option:
+                high_res_masks = high_res_masks.sum(dim=1)
 
             high_res_masks_for_mem_enc = high_res_masks
             maskmem_features, maskmem_pos_enc = self._encode_new_memory(
@@ -950,6 +959,7 @@ class SAM2Base(torch.nn.Module):
             high_res_masks,
             object_score_logits,
             current_out,
+            pred_option= self.pred_option
         )
 
         return current_out

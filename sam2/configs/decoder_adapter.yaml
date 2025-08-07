@@ -2,12 +2,12 @@
 
 scratch:
   resolution: 512
-  train_video_batch_size: 8
+  train_video_batch_size: 1
   num_train_workers: 0
-  num_frames: 8
+  num_frames: 1
   max_num_objects: 5
-  base_lr: 5.0e-5
-  vision_lr: 3.0e-5
+  base_lr: 1.0e-3
+  vision_lr: 1.0e-3
   phases_per_epoch: 1
   num_epochs: 1000
 
@@ -15,10 +15,10 @@ scratch:
 
 dataset:
   # PATHS to Dataset
-  img_folder: /scratch_net/ken/radjoe/BraTS/Training/images_UNN  # PATH to MOSE JPEGImages folder
-  gt_folder: /scratch_net/ken/radjoe/BraTS/Training/labels_UNN   # PATH to MOSE Annotations folder
-  val_folder: /scratch_net/ken/radjoe/BraTS/Validation/images_UNN  # PATH to MOSE JPEGImages folder
-  val_gt_folder: /scratch_net/ken/radjoe/BraTS/Validation/labels_UNN  # PATH to MOSE Annotations folder
+  img_folder: /scratch_net/ken/radjoe/BraTS/Tests/images_UNN  # PATH to MOSE JPEGImages folder
+  gt_folder: /scratch_net/ken/radjoe/BraTS/Tests/labels_UNN   # PATH to MOSE Annotations folder
+  val_folder: /scratch_net/ken/radjoe/BraTS/Tests/images_UNN  # PATH to MOSE JPEGImages folder
+  val_gt_folder: /scratch_net/ken/radjoe/BraTS/Tests/labels_UNN  # PATH to MOSE Annotations folder
   file_list_txt: null
   multiplier: 1
 
@@ -125,7 +125,8 @@ trainer:
         fpn_interp_model: nearest
 
     freeze_image_encoder: true
-    # freeze_adapter : true
+    freeze_all: true
+    
     memory_attention:
       _target_: sam2.modeling.memory_attention.MemoryAttention
       d_model: 256
@@ -221,7 +222,7 @@ trainer:
 
     ####### Training specific params #######
     # box/point input and corrections
-    prob_to_use_pt_input_for_train: 0.5
+    prob_to_use_pt_input_for_train: 1.0
     prob_to_use_pt_input_for_eval: 1.0
     prob_to_use_box_input_for_train: 1.0 
     prob_to_use_box_input_for_eval: 1.0
@@ -233,7 +234,7 @@ trainer:
     # maximum 2 initial conditioning frames
     num_init_cond_frames_for_train: 1
     rand_init_cond_frames_for_train: True  # random 1~2
-    num_correction_pt_per_frame: 7
+    num_correction_pt_per_frame: 1
     use_act_ckpt_iterative_pt_sampling: false
     
 
@@ -363,7 +364,7 @@ trainer:
         loss_mask: 20
         loss_dice: 1
         loss_iou: 0
-        loss_class: 1
+        loss_class: 0
       supervise_all_iou: true
       iou_use_l1_loss: true
       pred_obj_scores: true
@@ -396,13 +397,13 @@ trainer:
 
       state_dict:
         _target_: training.utils.checkpoint_utils.load_checkpoint_and_apply_kernels
-        checkpoint_path: checkpoints/MedSAM2_latest.pt # PATH to SAM 2.1 checkpoint
+        checkpoint_path: checkpoints/checkpoint_10.pt # PATH to SAM 2.1 checkpoint
         ckpt_state_dict_keys: ['model']
 
 launcher:
   num_nodes: 1
   gpus_per_node: 4
-  experiment_log_dir: /scratch_net/ken/radjoe/Projects/Experiments/SAMEXP/logs/decoder_only # Path to log directory, defaults to ./sam2_logs/${config_name}
+  experiment_log_dir: /scratch_net/ken/radjoe/Projects/Experiments/SAMEXP/logs/decoder_only_adapter # Path to log directory, defaults to ./sam2_logs/${config_name}
 
 # SLURM args if running on a cluster
 submitit:

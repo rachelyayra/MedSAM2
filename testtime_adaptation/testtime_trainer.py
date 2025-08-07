@@ -1,8 +1,4 @@
-# import sys
-# sys.path.append("/scratch_net/ken/radjoe/Projects/Experiments/SAMEXP/") 
-from experiments.MedSAM_experiment import predict_and_save
-# from datasets.datasets import MRIDataset, DRIVEDataset, STAREDataset
-from torch.utils.data import DataLoader
+from training.trainer import Trainer
 
 import gc
 import json
@@ -13,7 +9,6 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional
-import copy
 
 import numpy as np
 
@@ -22,6 +17,7 @@ import torch.distributed as dist
 import torch.nn as nn
 from hydra.utils import instantiate
 from iopath.common.file_io import g_pathmgr
+
 
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
@@ -35,10 +31,7 @@ from training.utils.checkpoint_utils import (
     load_state_dict_into_model,
     with_check_parameter_frozen,
 )
-
-from training.trainer import unwrap_ddp_if_wrapped
-
-from training.utils.data_utils import BatchedVideoDatapoint, MRIDataset
+from training.utils.data_utils import BatchedVideoDatapoint
 from training.utils.distributed import all_reduce_max, barrier, get_rank
 
 from training.utils.logger import Logger, setup_logging
@@ -57,15 +50,17 @@ from training.utils.train_utils import (
     MemMeter,
     Phase,
     ProgressMeter,
+    EarlyStopper,
     set_seeds,
     setup_distributed_backend,
 )
 
+from torchvision.utils import save_image
 
-from training.trainer import Trainer
-
-
-
+def unwrap_ddp_if_wrapped(model):
+    if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+        return model.module
+    return model
 
 class TestTimeTrainer(Trainer):
     def __init__(self, *, data, model, logging, checkpoint, max_epochs, **kwargs):
@@ -77,39 +72,17 @@ class TestTimeTrainer(Trainer):
             max_epochs=max_epochs,
             **kwargs
         )
-
-        self.test_time = True
-
-        if self.test_time:
-            self.mode = 'test_time'
-
         self.view_transform = A.Compose([
         A.RandomBrightnessContrast(p=1.0),
         A.Normalize(),
-        ToTensorV2()
+        ToTensorV2(),
     ])
 
+
     def run(self):
-        assert self.mode in ["train", "train_only", "val", "test_time"]
-        if self.mode == "train":
-            if self.epoch > 0:
-                logging.info(f"Resuming training from epoch: {self.epoch}")
-                # resuming from a checkpoint
-                if self.is_intermediate_val_epoch(self.epoch - 1):
-                    logging.info("Running previous val epoch")
-                    self.epoch -= 1
-                    self.run_val()
-                    self.epoch += 1
-            self.run_train()
-            self.run_val()
-        elif self.mode == "val":
-            self.run_val()
-        elif self.mode == "train_only":
-            self.run_train()
-        elif self.mode == "test_time":
-            self.model = unwrap_ddp_if_wrapped(self.model)
-            self.original_state = self.model.state_dict()
-            self.train_tta()
+        self.model = unwrap_ddp_if_wrapped(self.model)
+        self.original_state = self.model.state_dict()
+        self.train_tta()
 
     def run_train(self, batch):
         
@@ -130,6 +103,39 @@ class TestTimeTrainer(Trainer):
                     f.write(json.dumps(outs) + "\n")
 
             self.epoch += 1
+
+    def train_tta(self):
+        train_loader = self.train_dataset.get_loader(epoch=0)
+        for data_iter, batch in enumerate(train_loader):
+            # Training and Adaptation
+            self.training = True
+            print(f'The batch: {len(batch)}')
+            videos = batch[1]
+            segment_loader = batch[2]
+            batch = batch[0]
+            self.model.load_state_dict(self.original_state, strict=True)
+            self.optim = construct_optimizer(
+                self.model,
+                self.optim_conf.optimizer,
+                self.optim_conf.options,
+                self.optim_conf.param_group_modifiers,
+            )
+            self.scaler = torch.cuda.amp.GradScaler()
+            self.data_iter = data_iter
+            self.epoch = 0
+            print(f'The len of the batch: {len(batch)}')
+            self.run_train(batch)
+
+            # Predict Here
+            self.model.training = False
+            prediction, label = self.model.predict(videos, segment_loader)
+
+            # save prediction 
+            pred_npy = self.postprocess_save(prediction, label)
+            save_path = 'tests.npy'
+            np.save(save_path, pred_npy)
+
+            
 
     def train_epoch(self, batch_load):
 
@@ -224,50 +230,7 @@ class TestTimeTrainer(Trainer):
         return out_dict
 
 
-    def train_tta(self):
-        train_loader = self.train_dataset.get_loader(epoch=0)
-        for data_iter, batch in enumerate(train_loader):
-            self.model.load_state_dict(self.original_state, strict=True)
-            self.optim = construct_optimizer(
-                self.model,
-                self.optim_conf.optimizer,
-                self.optim_conf.options,
-                self.optim_conf.param_group_modifiers,
-            )
-            self.scaler = torch.cuda.amp.GradScaler()
-            self.data_iter = data_iter
-            self.epoch = 0
-            self.run_train(batch)
-            video_ids = batch.metadata.video_ids 
-            unique_vids = torch.unique(video_ids)
-            unique_vids_list = unique_vids.tolist() 
-            # Save checkpoint before adaptation
-            # self.save_checkpoint(self.epoch + 1)
-            video_path =  "/scratch_net/ken/radjoe/BraTS/Validation/images_UNN"  # PATH to MOSE JPEGImages folder 
-            label_path = "/scratch_net/ken/radjoe/BraTS/Validation/labels_UNN"
-            all_files = [i for i in sorted(os.listdir(video_path)) if i.endswith('.npy')]
 
-            data_names = [all_files[idx] for idx in unique_vids_list]
-
-            dataset = MRIDataset(video_path, label_path, img_list = data_names)
-            print(dataset)
-            if dist.is_initialized():
-                rank = dist.get_rank()
-                world_size = dist.get_world_size()
-            else:
-                rank = 0
-                world_size = 1
-            print(f'This is the word size: {world_size}')
-            checkpoint_paths = self.save_checkpoint(epoch=self.data_iter, rank=rank)
-            pred_dataloader = DataLoader(dataset, shuffle=False)
-
-            savepath = f'/scratch_net/ken/radjoe/Projects/Experiments/SAMEXP/results_TTA/BraTS_GLI/MedSAM2/rank_{rank}'
-            model_type = 'video'
-
-            print(f'THE PREDICTOR {len(dataset), data_names } ')
-            predict_and_save(checkpoint=checkpoint_paths[0], model_cfg='configs/sam2.1_hiera_t512.yaml',video_path=video_path, dataloader=pred_dataloader,savepath =savepath, model_type=model_type, )
-            print('THE PREDICTOR ')
-            os.remove(checkpoint_paths[0])
 
     def _run_step(
         self,
@@ -326,8 +289,7 @@ class TestTimeTrainer(Trainer):
     ):
 
         results = self.generate_batch_views(batch=batch)
-        
-        
+
         outputs_batch = []
         outputs = model(batch)
         outputs_batch.append(outputs)
@@ -337,11 +299,18 @@ class TestTimeTrainer(Trainer):
             outputs_batch.append(outputs)
 
         batch_size = len(batch.img_batch)
+        
+        targets = batch.masks
 
+        print(f'batch size {batch.img_batch.shape, len(outputs), len(outputs[0])}')
+        self.log_validation_image(outputs, targets, self.logging_conf.log_dir )
+
+        # batch_size = len(batch.img_batch)
 
         key = batch.dict_key  # key for dataset
 
         loss = self.loss[key](outputs_batch)
+        
         
         loss_str = f"Losses/{phase}_{key}_loss"
 
@@ -449,4 +418,58 @@ class TestTimeTrainer(Trainer):
                 results.append(new_batch)
             
             return results
+    
+    def log_validation_image(self, output, target, savepath):
+        savepaths = f'{savepath}/{self.epoch}'
+        # target = target.squeeze(0)
+        os.makedirs(savepaths,exist_ok=True)
+        for frame_idx in range(len(output)):
+            print(f'This is the frame idx: {frame_idx}')
+            if frame_idx == 0:
+                step_list = output[frame_idx]['multistep_pred_multimasks_high_res']
+                print(f'List of steps: {len(step_list)}')
+                for step_idx in range(len(step_list)):
+                    if step_idx == 0:
+                        pred_save = step_list[step_idx]
+                        print(f'prediction saving: {pred_save.shape, target.shape}')
+                        pred_save = pred_save.squeeze(0)
+                        
+                        for idx in range(len(pred_save)):
+                            save_image(pred_save[idx].float(), f'{savepaths}/pred_{idx}.png') 
+                            save_image(target[frame_idx, idx].float(), f'{savepaths}/gt_{idx}.png') 
 
+    def generate_batch_views(self, batch: BatchedVideoDatapoint, num_views=4):
+            # batch_tensor: [B, C, H, W]
+            results = []
+            for i in range(num_views):
+                new_batch = BatchedVideoDatapoint(
+                img_batch=batch.img_batch,
+                obj_to_frame_idx=batch.obj_to_frame_idx,
+                masks=batch.masks,
+                metadata= batch.metadata,
+                dict_key=batch.dict_key,
+                batch_size = batch.batch_size
+                )
+                for i in range(len(batch.img_batch[0])):
+
+                    for j in range(len(batch.img_batch[:, 0])):
+
+                        temp = torch.permute(batch.img_batch[j][i], (1, 2, 0))
+                        temp = temp.cpu().numpy()
+                        temp = self.view_transform(image = temp)['image']
+
+                        new_batch.img_batch[j][i] = temp
+
+                results.append(new_batch)
+            
+            return results
+        
+    def postprocess_save(self,prediction,label_shape):
+        total_mask = np.zeros(label_shape)
+        print(f'label shape {(total_mask.shape)}')
+        for out_frame_idx in range(0, 160):
+                for out_obj_id, out_mask in prediction[out_frame_idx].items():
+                    print(f'The outmask shape{out_mask.shape}')
+                    print(total_mask.shape)
+                    total_mask[:,:, :, out_frame_idx] = out_mask
+        return total_mask

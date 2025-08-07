@@ -50,6 +50,7 @@ class TwoWayTransformer(nn.Module):
         mlp_dim: int,
         activation: Type[nn.Module] = nn.ReLU,
         attention_downsample_rate: int = 2,
+        use_adapter = False,
     ) -> None:
         """
         A transformer decoder that attends to an input image using
@@ -69,6 +70,7 @@ class TwoWayTransformer(nn.Module):
         self.num_heads = num_heads
         self.mlp_dim = mlp_dim
         self.layers = nn.ModuleList()
+        self.use_adapter = use_adapter
 
         for i in range(depth):
             self.layers.append(
@@ -79,6 +81,7 @@ class TwoWayTransformer(nn.Module):
                     activation=activation,
                     attention_downsample_rate=attention_downsample_rate,
                     skip_first_layer_pe=(i == 0),
+                    use_adapter= self.use_adapter
                 )
             )
 
@@ -143,6 +146,7 @@ class TwoWayAttentionBlock(nn.Module):
         activation: Type[nn.Module] = nn.ReLU,
         attention_downsample_rate: int = 2,
         skip_first_layer_pe: bool = False,
+        use_adapter = False,
     ) -> None:
         """
         A transformer block with four layers: (1) self-attention of sparse
@@ -177,6 +181,12 @@ class TwoWayAttentionBlock(nn.Module):
         )
 
         self.skip_first_layer_pe = skip_first_layer_pe
+        # Decoder Adapter
+        self.use_adapter = use_adapter
+        if self.use_adapter:
+            self.decoder_adapter = DecoderAdapter(embedding_dim)
+        else:
+            self.decoder_adapter = nn.Identity()
 
     def forward(
         self, queries: Tensor, keys: Tensor, query_pe: Tensor, key_pe: Tensor
@@ -358,3 +368,59 @@ class RoPEAttention(Attention):
         out = self.out_proj(out)
 
         return out
+
+
+class DecoderAdapter(nn.Module):
+    def __init__(self, embedding_size, prompt_size=512):
+        super().__init__()
+        self.embedding_size = embedding_size
+        self.prompt_size = prompt_size
+
+        # Learnable adaptation prompt: [N, D]
+        self.prompt = nn.Parameter(torch.empty(prompt_size, embedding_size))
+        nn.init.xavier_uniform_(self.prompt)
+
+        # Linear projections for Q, K, V
+        self.linear_q = nn.Linear(embedding_size, embedding_size)
+        self.linear_k = nn.Linear(embedding_size, embedding_size)
+        self.linear_v = nn.Linear(embedding_size, embedding_size)
+
+        # Output projection and final transform
+        self.linear_o = nn.Linear(embedding_size, embedding_size)
+        self.linear_t = nn.Linear(embedding_size, embedding_size)
+
+        # Gating factor initialized to zero
+        self.g_l = nn.Parameter(torch.tensor(0.0))
+
+    def forward(self, T_l):
+        """
+        T_l: Tensor of shape [B, M, D] — embeddings from current layer
+        Returns:
+            T_l': adapted embeddings, shape [B, M, D]
+        """
+
+        B, M, D = T_l.shape
+        N = self.prompt_size
+
+        # Compute queries from current embeddings
+        Q_l = self.linear_q(T_l)  # [B, M, D]
+
+        # Expand prompts for batch processing
+        prompt_expanded = self.prompt.unsqueeze(0).expand(B, -1, -1)  # [B, N, D]
+
+        # Keys and values from prompts
+        K_l = self.linear_k(prompt_expanded)  # [B, N, D]
+        V_l = self.linear_v(prompt_expanded)  # [B, N, D]
+
+        # Attention scores: [B, M, N]
+        attn_scores = torch.matmul(Q_l, K_l.transpose(1, 2)) / (D ** 0.5)
+        attn_weights = F.softmax(attn_scores, dim=-1)  # [B, M, N]
+
+        # Apply attention weights to values: [B, M, D]
+        S_l = torch.matmul(attn_weights, V_l)
+        S_l = self.linear_o(S_l)  # [B, M, D]
+
+        # Gated residual correction
+        T_l = self.linear_t(T_l + self.g_l * S_l)  # [B, M, D]
+
+        return T_l

@@ -46,7 +46,8 @@ class RandomUniformSampler(VOSSampler):
                 raise Exception(
                     f"Cannot sample {self.num_frames} frames from video {video.video_name} as it only has {len(video.frames)} annotated frames."
                 )
-            start = random.randrange(0, len(video.frames) - self.num_frames + 1)
+            # start = random.randrange(0, len(video.frames) - self.num_frames + 1)
+            start = 90
             frames = [video.frames[start + step] for step in range(self.num_frames)]
             if random.uniform(0, 1) < self.reverse_time_prob:
                 # Reverse time

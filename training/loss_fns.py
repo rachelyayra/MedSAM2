@@ -18,7 +18,7 @@ from training.trainer import CORE_LOSS_KEY
 from training.utils.distributed import get_world_size, is_dist_avail_and_initialized
 
 
-def dice_loss(inputs, targets, num_objects, loss_on_multimask=False):
+def dice_single_loss(inputs, targets, num_objects, loss_on_multimask=False):
     """
     Compute the DICE loss, similar to generalized IOU for masks
     Args:
@@ -42,11 +42,41 @@ def dice_loss(inputs, targets, num_objects, loss_on_multimask=False):
 
     return loss.sum() 
 
+def dice_loss(inputs, targets, num_objects, loss_on_multimask=False):
+    """
+    Compute the DICE loss, similar to generalized IOU for masks
+    Args:
+        inputs: A float tensor of arbitrary shape.
+                The predictions for each example.
+        targets: A float tensor with the same shape as inputs. Stores the binary
+                 classification label for each element in inputs
+                (0 for the negative class and 1 for the positive class).
+        num_objects: Number of objects in the batch
+        loss_on_multimask: True if multimask prediction is enabled
+    Returns:
+        Dice loss tensor
+    """
+    inputs = inputs.sigmoid()
+    if loss_on_multimask:
+        # inputs and targets are [N, M, H, W] where M corresponds to multiple predicted masks
+        assert inputs.dim() == 4 and targets.dim() == 4
+        # flatten spatial dimension while keeping multimask channel dimension
+        inputs = inputs.flatten(2)
+        targets = targets.flatten(2)
+        numerator = 2 * (inputs * targets).sum(-1)
+    else:
+        inputs = inputs.flatten(1)
+        numerator = 2 * (inputs * targets).sum(1)
+    denominator = inputs.sum(-1) + targets.sum(-1)
+    loss = 1 - (numerator + 1) / (denominator + 1)
+    if loss_on_multimask:
+        return loss / num_objects
+    return loss.sum() / num_objects
 
 def sigmoid_focal_loss(
     inputs,
     targets,
-    # num_objects,
+    num_objects,
     alpha: float = 0.25,
     gamma: float = 2,
     loss_on_multimask=False,
@@ -68,13 +98,59 @@ def sigmoid_focal_loss(
     Returns:
         focal loss tensor
     """
-    # print(f'The shape of inputs in sigmoid function: {inputs.shape, targets.shape}')
-    # for i in range(len(inputs)):
-    #     pred = inputs[i].sigmoid()
-    #     for j in range(len(pred)):
-    #         save_image(pred[j].float(), f'prednew_{j}.png') 
-    #         save_image(targets[i][j].float(), f'gtnew_{j}.png') 
-    # print(inputs.min(), inputs.max()) 
+    prob = inputs.sigmoid()
+    ce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
+    p_t = prob * targets + (1 - prob) * (1 - targets)
+    loss = ce_loss * ((1 - p_t) ** gamma)
+
+    if alpha >= 0:
+        alpha_t = alpha * targets + (1 - alpha) * (1 - targets)
+        loss = alpha_t * loss
+
+    if loss_on_multimask:
+        # loss is [N, M, H, W] where M corresponds to multiple predicted masks
+        assert loss.dim() == 4
+        return loss.flatten(2).mean(-1) / num_objects  # average over spatial dims
+    return loss.mean(1).sum() / num_objects
+
+
+def sigmoid_single_focal_loss(
+    inputs,
+    targets,
+    # num_objects,
+    step,
+    alpha: float = 0.25,
+    gamma: float = 2,
+    
+    loss_on_multimask=False,
+    
+):
+    """
+    Loss used in RetinaNet for dense detection: https://arxiv.org/abs/1708.02002.
+    Args:
+        inputs: A float tensor of arbitrary shape.
+                The predictions for each example.
+        targets: A float tensor with the same shape as inputs. Stores the binary
+                 classification label for each element in inputs
+                (0 for the negative class and 1 for the positive class).
+        num_objects: Number of objects in the batch
+        alpha: (optional) Weighting factor in range (0,1) to balance
+                positive vs negative examples. Default = -1 (no weighting).
+        gamma: Exponent of the modulating factor (1 - p_t) to
+               balance easy vs hard examples.
+        loss_on_multimask: True if multimask prediction is enabled
+    Returns:
+        focal loss tensor
+    """
+    print(f'The shape of inputs in sigmoid function: {inputs.shape, targets.shape}')
+    if step < 5: 
+        for i in range(len(inputs)):
+            pred = inputs[i].sigmoid()
+            for j in range(len(pred)):
+                save_image(inputs[i][j].float(), f'predraw_step_{step}_{j}.png') 
+                save_image(pred[j].float(), f'prednew_step_{step}_{j}.png') 
+                save_image(targets[i][j].float(), f'gtnew_step_{step}_{j}.png') 
+    print(inputs.min(), inputs.max()) 
 
     B, C, H, W = inputs.shape
     prob = inputs.sigmoid()
@@ -94,21 +170,120 @@ def sigmoid_focal_loss(
 
     return loss.mean()
 
-def cosine_diversity_loss(preds):
+def sigmoid_single_focal_loss(
+    inputs,
+    targets,
+    # num_objects,
+    step,
+    alpha: float = 0.25,
+    gamma: float = 0,
+    
+    loss_on_multimask=False,
+    
+):
     """
-    preds: Tensor of shape [B, C, H, W] — probabilities or features.
-    Encourages different class predictions to be less similar.
+    Loss used in RetinaNet for dense detection: https://arxiv.org/abs/1708.02002.
+    Args:
+        inputs: A float tensor of arbitrary shape.
+                The predictions for each example.
+        targets: A float tensor with the same shape as inputs. Stores the binary
+                 classification label for each element in inputs
+                (0 for the negative class and 1 for the positive class).
+        num_objects: Number of objects in the batch
+        alpha: (optional) Weighting factor in range (0,1) to balance
+                positive vs negative examples. Default = -1 (no weighting).
+        gamma: Exponent of the modulating factor (1 - p_t) to
+               balance easy vs hard examples.
+        loss_on_multimask: True if multimask prediction is enabled
+    Returns:
+        focal loss tensor
     """
-    B, C, H, W = preds.shape
-    preds_flat = preds.view(B, C, -1)  # [B, C, H*W]
+    print(f'The shape of inputs in sigmoid function: {inputs.shape, targets.shape}')
+    # if step < 5: 
+    #     for i in range(len(inputs)):
+    #         pred = inputs[i].sigmoid()
+    #         for j in range(len(pred)):
+    #             save_image(inputs[i][j].float(), f'predraw_step_{step}_{j}.png') 
+    #             save_image(pred[j].float(), f'prednew_step_{step}_{j}.png') 
+    #             save_image(targets[i][j].float(), f'gtnew_step_{step}_{j}.png') 
+    # print(inputs.min(), inputs.max()) 
 
-    loss = 0
-    for i in range(C):
-        for j in range(i + 1, C):
-            cos_sim = F.cosine_similarity(preds_flat[:, i], preds_flat[:, j], dim=1)
-            loss += cos_sim.mean()  # high cosine similarity means low diversity
+    B, C, H, W = inputs.shape
+    prob = inputs.sigmoid()
+    ce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
+    p_t = prob * targets + (1 - prob) * (1 - targets)
+    loss = ce_loss * ((1 - p_t) ** gamma)
+    alpha = [0.90, 0.75, 0.75]
+    # print(f'Print: {alpha}')
+    if alpha is not None:
+        if isinstance(alpha, (list, tuple)):
+            alpha = torch.tensor(alpha, device=inputs.device, dtype=inputs.dtype)
+        elif isinstance(alpha, float):
+            alpha = torch.tensor([alpha] * C, device=inputs.device, dtype=inputs.dtype)
+        alpha = alpha.view(1, C, 1, 1)  # broadcast to [B, C, H, W]
+        alpha_t = alpha * targets + (1 - alpha) * (1 - targets)
+        loss = alpha_t * loss
 
-    return loss / (C * (C - 1) / 2)
+    return loss.mean()
+
+def entropy_loss(
+    inputs,
+
+    
+):
+    """
+    Loss used in RetinaNet for dense detection: https://arxiv.org/abs/1708.02002.
+    Args:
+        inputs: A float tensor of arbitrary shape.
+                The predictions for each example.
+        targets: A float tensor with the same shape as inputs. Stores the binary
+                 classification label for each element in inputs
+                (0 for the negative class and 1 for the positive class).
+        num_objects: Number of objects in the batch
+        alpha: (optional) Weighting factor in range (0,1) to balance
+                positive vs negative examples. Default = -1 (no weighting).
+        gamma: Exponent of the modulating factor (1 - p_t) to
+               balance easy vs hard examples.
+        loss_on_multimask: True if multimask prediction is enabled
+    Returns:
+        focal loss tensor
+    """
+    print(f'The shape of inputs in sigmoid function: {inputs.shape}')
+    # if step < 5: 
+    #     for i in range(len(inputs)):
+    #         pred = inputs[i].sigmoid()
+    #         for j in range(len(pred)):
+    #             save_image(inputs[i][j].float(), f'predraw_step_{step}_{j}.png') 
+    #             save_image(pred[j].float(), f'prednew_step_{step}_{j}.png') 
+    #             save_image(targets[i][j].float(), f'gtnew_step_{step}_{j}.png') 
+    # print(inputs.min(), inputs.max()) 
+
+    B, C, H, W = inputs.shape
+    prob = inputs.sigmoid()
+    eps = 1e-6
+    loss = - (prob * torch.log(prob + eps) + (1 - prob) * torch.log(1 - prob + eps))
+    ce_loss = loss.mean()
+
+    return ce_loss
+
+    # return loss.mean()
+
+def consistency_loss(inputs):
+    """
+    Compute average pairwise L2 consistency loss between multiple predictions.
+    """
+    probs = [logits.sigmoid() for logits in inputs]
+    # print(f'Length of {len(inputs)}')
+    loss = 0.0
+    count = 0
+
+    for i in range(len(probs)):
+        for j in range(i + 1, len(probs)):
+            loss += F.mse_loss(probs[i], probs[j])
+            count += 1
+
+    return loss / count
+
 
 def iou_loss(
     inputs, targets, pred_ious, num_objects, loss_on_multimask=False, use_l1_loss=False
@@ -185,6 +360,7 @@ class MultiStepMultiMasksAndIous(nn.Module):
         self.pred_obj_scores = pred_obj_scores
 
     def forward(self, outs_batch: List[Dict], targets_batch: torch.Tensor):
+        
         assert len(outs_batch) == len(targets_batch)
         num_objects = torch.tensor(
             (targets_batch.shape[1]), device=targets_batch.device, dtype=torch.float
@@ -198,7 +374,7 @@ class MultiStepMultiMasksAndIous(nn.Module):
             cur_losses = self._forward(outs, targets, num_objects)
             for k, v in cur_losses.items():
                 losses[k] += v
-
+        
         return losses
 
     def _forward(self, outputs: Dict, targets: torch.Tensor, num_objects):
@@ -331,7 +507,7 @@ class MultiStepMultiMasksAndIous(nn.Module):
 
         return reduced_loss
 
-class MultiStepMultiMaskLosses(nn.Module):
+class MultiStepSingleTTAMasksAndIous(nn.Module):
     def __init__(
         self,
         weight_dict,
@@ -342,7 +518,6 @@ class MultiStepMultiMaskLosses(nn.Module):
         pred_obj_scores=False,
         focal_gamma_obj_score=0.0,
         focal_alpha_obj_score=-1,
-        test_time = True
     ):
         """
         This class computes the multi-step multi-mask and IoU losses.
@@ -372,42 +547,37 @@ class MultiStepMultiMaskLosses(nn.Module):
         self.supervise_all_iou = supervise_all_iou
         self.iou_use_l1_loss = iou_use_l1_loss
         self.pred_obj_scores = pred_obj_scores
-        self.test_time = test_time
+        self.step_count = 0
 
-    def forward(self, temp_batch, targets_batch: torch.Tensor = None):
-        outs_batch = temp_batch[0]
-        # print(temp_batch[0][0])
-        # print(outs_batch[0][0])
-        
-        div_info = outs_batch[0]["multistep_pred_multimasks_high_res"][0]
-        # print(div_info)
-        # assert len(outs_batch) == len(targets_batch)
-        num_objects = torch.tensor(
-            (div_info.shape[0]), device=div_info.device, dtype=torch.float
-
-        ) 
-
-         # Number of objects is fixed within a batch
-        if is_dist_avail_and_initialized():
-            torch.distributed.all_reduce(num_objects)
-        num_objects = torch.clamp(num_objects / get_world_size(), min=1).item()
+    def forward(self, outs_batch: List[Dict]):
+        print(f'The shapes of the inputs {len(outs_batch)}')
 
         losses = defaultdict(int)
-
-        for i in range(len(outs_batch)):
-            outs = outs_batch[i]
-
-
-            con_list = [view[i] for view in temp_batch]
-            # print(f'Lenth of conlist {len(con_list)}')
-
-            cur_losses = self._forward(outputs=outs, con_list=con_list , num_objects=num_objects)
+        for frame_idx in range(len(outs_batch[0])):
+            # For each frame
+            frame_input = [view[frame_idx] for view in outs_batch]
+            cur_losses = self._forward(frame_input)
             for k, v in cur_losses.items():
                 losses[k] += v
-        
+
+        # print(f'This is the losses{losses.items()}')
         return losses
 
-    def _forward(self, outputs: Dict,  num_objects , targets: torch.Tensor = None, con_list = None):
+    def forward(self, outs_batch: List[Dict]):
+        print(f'The shapes of the inputs {len(outs_batch)}')
+
+        losses = defaultdict(int)
+        for outs in outs_batch:
+            # For each frame
+            print(f'the size of the target {len(outs)}')
+            cur_losses = self._forward(outs)
+            for k, v in cur_losses.items():
+                losses[k] += v
+
+        # print(f'This is the losses{losses.items()}')
+        return losses
+
+    def _forward(self, outputs: List[Dict]):
         """
         Compute the losses related to the masks: the focal loss and the dice loss.
         and also the MAE or MSE loss between predicted IoUs and actual IoUs.
@@ -421,97 +591,46 @@ class MultiStepMultiMaskLosses(nn.Module):
         If `supervise_all_iou` is True, we backpropagate ious losses for all predicted masks.
         """
 
-        # assert target_masks.dim() == 4  # [N, 1, H, W]
-        src_masks_list = outputs["multistep_pred_multimasks_high_res"]
-        ious_list = outputs["multistep_pred_ious"]
-        object_score_logits_list = outputs["multistep_object_score_logits"]
 
-        conlist = [ i["multistep_pred_multimasks_high_res"] for i in con_list]
-        # print(f'Len of Con list {len(conlist[0]), len(src_masks_list)}')
-        assert len(src_masks_list) == len(ious_list)
-        assert len(object_score_logits_list) == len(ious_list)
+        con_masks = [output["multistep_pred_multimasks_high_res"] for output in outputs ]
 
-        # accumulate the loss over prediction steps
         losses = {"loss_mask": 0, "loss_dice": 0, "loss_iou": 0, "loss_class": 0}
-        for i in range(len(src_masks_list)):
-            # print(f'Index {i}')
-            src_masks = src_masks_list[i]
-            ious = ious_list[i]
-            object_score_logits = object_score_logits_list[i]
-            con_phase = [el[i] for el in conlist]
-
+        for step_idx in range(len(con_masks[0])):
+            # print('This is the second loop')
+            con_masks_steps = [output[step_idx]for output in con_masks]
             self._update_losses(
-                losses, src_masks, ious, num_objects, object_score_logits, con_phase
+                losses, con_masks_steps
             )
+            self.step_count += 1
+        
         losses[CORE_LOSS_KEY] = self.reduce_loss(losses)
         
         return losses
 
-
-    # 
-    #  torch.Size([3, 1, 512, 512]) for input masks, target is  ([3, 512, 512])
     def _update_losses(
-        self, losses, src_masks,  ious, num_objects, object_score_logits, con_list
+        self, losses, src_masks
     ):
+        src_masks = src_masks[0].squeeze(0)
+        # print(f'The shape of inputs before entry to loss calcs: {src_masks.shape, target_masks.shape}')
+        if len(src_masks.shape) == 3:
+            src_masks = src_masks.unsqueeze(0)
+            # target_masks = target_masks.unsqueeze(0)
+        # target_masks = target_masks.view(-1, 3, 512, 512) 
         # target_masks = target_masks.expand_as(src_masks)
         # get focal, dice and iou loss on all output masks in a prediction step
-        loss_multimask = sigmoid_entropy_loss(
+        loss_multimask = entropy_loss(
             src_masks,
-            num_objects,
-            alpha=self.focal_alpha,
-            gamma=self.focal_gamma,
-            loss_on_multimask=True,
         )
-        # print(loss_multimask.dim())
-        assert loss_multimask.dim() == 2
+        loss_multidice = consistency_loss(src_masks)
 
-        con_loss = consistency_l2_loss(
-            con_list
-        )
-        # if not self.pred_obj_scores:
-        #     loss_class = torch.tensor(
-        #         0.0, dtype=loss_multimask.dtype, device=loss_multimask.device
-        #     )
-        #     target_obj = torch.ones(
-        #         loss_multimask.shape[0],
-        #         1,
-        #         dtype=loss_multimask.dtype,
-        #         device=loss_multimask.device,
-        #     )
-        # else:
-        #     target_obj = torch.any((target_masks[:, 0] > 0).flatten(1), dim=-1)[
-        #         ..., None
-        #     ].float()
-        #     loss_class = sigmoid_entropy_loss(
-        #         object_score_logits,
-        #         target_obj,
-        #         num_objects,
-        #         alpha=self.focal_alpha_obj_score,
-        #         gamma=self.focal_gamma_obj_score,
-        #     )
-        if loss_multimask.size(1) > 1:
-            # take the mask indices with the smallest focal + dice loss for back propagation
-            loss_combo = (
-                loss_multimask * self.weight_dict["loss_mask"]
-            )
-            best_loss_inds = torch.argmin(loss_combo, dim=-1)
-            batch_inds = torch.arange(loss_combo.size(0), device=loss_combo.device)
-            loss_mask = loss_multimask[batch_inds, best_loss_inds].unsqueeze(1)
-
-        else:
-            loss_mask = loss_multimask
-
-        # backprop focal, dice and iou loss only if obj present
-        loss_mask = loss_mask 
-        con_loss = con_loss 
-        total_loss = loss_mask  + con_loss
-
-
-        # sum over batch dimension (note that the losses are already divided by num_objects)
-        losses["loss_mask"] += total_loss.sum()
-        losses["loss_dice"] += torch.tensor(0.0, device=total_loss.device)
-        losses["loss_iou"] += torch.tensor(0.0, device=total_loss.device)
-        losses["loss_class"] += torch.tensor(0.0, device=total_loss.device)
+        # loss_diversity_multi = cosine_diversity_loss(src_masks)
+        loss_mask = loss_multimask
+        loss_dice = loss_multidice
+        
+        losses["loss_mask"] += loss_mask.sum()
+        losses["loss_dice"] += loss_dice
+        losses["loss_iou"] += torch.tensor(0.0, device=loss_mask.device, requires_grad=True)
+        losses["loss_class"] += torch.tensor(0.0, device=loss_mask.device, requires_grad=True)
 
     def reduce_loss(self, losses):
         reduced_loss = 0.0
@@ -520,7 +639,7 @@ class MultiStepMultiMaskLosses(nn.Module):
                 raise ValueError(f"{type(self)} doesn't compute {loss_key}")
             if weight != 0:
                 reduced_loss += losses[loss_key] * weight
-
+        # print(f'Print the reduced: {reduced_loss}')
         return reduced_loss
     
 
@@ -565,10 +684,12 @@ class MultiStepSingleMasksAndIous(nn.Module):
         self.supervise_all_iou = supervise_all_iou
         self.iou_use_l1_loss = iou_use_l1_loss
         self.pred_obj_scores = pred_obj_scores
+        self.step_count = 0
 
     def forward(self, outs_batch: List[Dict], targets_batch: torch.Tensor):
         assert len(outs_batch) == len(targets_batch)
-        # print(f'The shapes of stuff {len(outs_batch), targets_batch.shape}')
+        print(f'The shapes of the inputs {len(outs_batch)}')
+        self.step_count = 0
         num_objects = torch.tensor(
             (targets_batch.shape[1]), device=targets_batch.device, dtype=torch.float
         )  # Number of objects is fixed within a batch
@@ -580,7 +701,7 @@ class MultiStepSingleMasksAndIous(nn.Module):
         losses = defaultdict(int)
         for outs, targets in zip(outs_batch, targets_batch):
             # For each frame
-            # print(f'the size of the target {targets.shape}')
+            print(f'the size of the target {len(outs)}')
             cur_losses = self._forward(outs, targets, num_objects)
             for k, v in cur_losses.items():
                 losses[k] += v
@@ -610,9 +731,7 @@ class MultiStepSingleMasksAndIous(nn.Module):
         object_score_logits_list = outputs["multistep_object_score_logits"]
         # print(f'The shape of inputs in the srcs: {len(src_masks_list), src_masks_list[0].shape}')
         assert len(src_masks_list) == len(ious_list)
-        assert len(object_score_logits_list) == len(ious_list)
-
-        # accumulate the loss over prediction steps
+        assert len(object_score_logits_list) == len(ious_list)        # accumulate the loss over prediction steps
         losses = {"loss_mask": 0, "loss_dice": 0, "loss_iou": 0, "loss_class": 0}
         for src_masks, ious, object_score_logits in zip(
             src_masks_list, ious_list, object_score_logits_list
@@ -621,6 +740,8 @@ class MultiStepSingleMasksAndIous(nn.Module):
             self._update_losses(
                 losses, src_masks, target_masks, ious, num_objects, object_score_logits
             )
+            self.step_count += 1
+        
         losses[CORE_LOSS_KEY] = self.reduce_loss(losses)
         
         return losses
@@ -636,19 +757,20 @@ class MultiStepSingleMasksAndIous(nn.Module):
         target_masks = target_masks.view(-1, 3, 512, 512) 
         # target_masks = target_masks.expand_as(src_masks)
         # get focal, dice and iou loss on all output masks in a prediction step
-        loss_multimask = sigmoid_focal_loss(
+        loss_multimask = sigmoid_single_focal_loss(
             src_masks,
             target_masks,
             # num_objects,
+            self.step_count,
             alpha=self.focal_alpha,
             gamma=self.focal_gamma,
             loss_on_multimask=True,
         )
-        loss_multidice = dice_loss(
+        loss_multidice = dice_single_loss(
             src_masks, target_masks, num_objects, loss_on_multimask=True
         )
 
-        loss_diversity_multi = cosine_diversity_loss (src_masks)
+        loss_diversity_multi = cosine_diversity_loss(src_masks)
         loss_mask = loss_multimask
         loss_dice = loss_multidice
         
