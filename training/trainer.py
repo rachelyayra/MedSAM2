@@ -1088,6 +1088,7 @@ class Trainer:
         os.makedirs(savepaths, exist_ok=True)
         print(f'Check unique: {target.unique(), target.shape}')
         targets_onehot = F.one_hot(target.squeeze(1).long(), 4)
+        print(f'Check shape of one_hot: {targets_onehot.shape}')
         targets_onehot = targets_onehot.permute(0, 1, 4, 2, 3).float()
         
         # targets_onehot = targets_onehot[:, 1:, :, :]  # drop channel 0

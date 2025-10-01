@@ -1327,6 +1327,7 @@ class SAM2TestTime(SAM2Train):
             high_res_masks,
             obj_ptr,
             object_score_logits,
+            upscaled_embedding,
         ) = sam_outputs
 
         print(f'The pred mask shapes: {low_res_masks.shape}')

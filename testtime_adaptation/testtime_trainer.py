@@ -1,3 +1,4 @@
+from pyexpat import model
 from training.trainer import Trainer
 
 import gc
@@ -9,6 +10,11 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional
+
+from sklearn.decomposition import PCA
+import matplotlib.pyplot as plt
+
+os.environ["TORCH_SHOW_CPP_STACKTRACES"] = "1"
 
 import numpy as np
 import torchvision.transforms.functional as F
@@ -22,6 +28,7 @@ import copy
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
+from torch.backends.cuda import sdp_kernel
 
 from training.optimizer import construct_optimizer
 
@@ -64,6 +71,22 @@ def unwrap_ddp_if_wrapped(model):
         return model.module
     return model
 
+
+torch.autograd.set_detect_anomaly(True)  # slow but precise
+
+def watch_nan_grads(model):
+    def hook(name):
+        def _h(g):
+            if g is None: return
+            if not torch.isfinite(g).all():
+                gg = torch.nan_to_num(g)
+                print(f"[NaN grad @ {name}] min={float(gg.min())} max={float(gg.max())}")
+        return _h
+
+    for n,p in model.named_parameters():
+        if p.requires_grad:
+            p.register_hook(hook(f"param:{n}"))
+
 class TestTimeTrainer(Trainer):
     def __init__(self, *, data, model, logging, checkpoint, max_epochs, **kwargs):
         super().__init__(
@@ -76,44 +99,56 @@ class TestTimeTrainer(Trainer):
         )
 
         self.brightness = A.Compose([
-            A.RandomBrightnessContrast(brightness_limit=(0.1, 0.1),
-                           contrast_limit=(0.1, 0.1), p=1.0),
+            A.RandomBrightnessContrast(
+                brightness_limit=0.2,      # uniform in [-0.2, +0.2]
+                contrast_limit=0.2,        # uniform in [-0.2, +0.2]
+                p=1.0                      # always apply, but randomized
+            ),
             ToTensorV2(),
         ])
 
+        # Tiny blur (random kernel, random sigma)
         self.gaussian_blur = A.Compose([
             A.GaussianBlur(
-                blur_limit=(3, 3), sigma_limit=(0.8, 0.8), p=1.0),
-            
+                blur_limit=(3, 5),         # random 3x3 or 5x5 kernel
+                sigma_limit=(0.1, 0.8),    # mild blur
+                p=1.0
+            ),
             ToTensorV2(),
         ])
 
+        # Light Gaussian noise
         self.gaussian_noise = A.Compose([
             A.GaussNoise(
-                var_limit=(1e-6, 1e-6), mean=0.0, p=1.0
+                var_limit=(2e-4, 1e-2),    # std ≈ 0.01–0.07 if data in [0,1]
+                mean=0.0,
+                p=1.0
             ),
             ToTensorV2(),
         ])
 
         self.randomgamma = A.Compose([
             A.RandomGamma(
-            gamma_limit=(102, 102), p=1.0
+            gamma_limit=(85, 115), p=1.0
             ),
             ToTensorV2(),
         ])  
 
-        self.flip = A.Compose([
+        self.hflip = A.Compose([
             A.HorizontalFlip(p=1.0),
             ToTensorV2(),
         ])
-
+        self.vflip = A.Compose([
+            A.VerticalFlip(p=1.0),
+            ToTensorV2(),
+        ])
         self.norm = A.Compose([A.Normalize(mean=(0.485,0.456,0.406),
                               std=(0.229,0.224,0.225)),
                   ToTensorV2()])
 
-        self.transforms = [self.brightness , self.gaussian_blur, self.gaussian_noise, self.randomgamma]
+        self.transforms = [self.brightness , self.gaussian_blur, self.gaussian_noise]
 
-        self.geo_transforms = [self.flip]
+        self.geo_transforms = [self.hflip]
 
         self.ema_decay = 0.999   # try 0.996–0.9997
         self.warmup_frac = 0.3   # for your consistency ramp, optional
@@ -306,14 +341,14 @@ class TestTimeTrainer(Trainer):
         with torch.cuda.amp.autocast(
             enabled=False,
             # dtype=get_amp_type(self.optim_conf.amp.amp_dtype),
-        ):
+        ), sdp_kernel(enable_flash=False, enable_math=True, enable_mem_efficient=True):
             loss_dict, batch_size, extra_losses = self._step(
                 batch,
                 self.model,
                 self.teacher,
                 phase,
             )
-
+        print(f'This is the losses{loss_dict.keys()}')
         assert len(loss_dict) == 1
         loss_key, loss = loss_dict.popitem()
 
@@ -324,9 +359,12 @@ class TestTimeTrainer(Trainer):
                 raise FloatingPointError(error_msg)
             else:
                 return
-
+        
+        
 
         self.scaler.scale(loss).backward()
+        
+
         loss_mts[loss_key].update(loss.item(), batch_size)
         for extra_loss_key, extra_loss in extra_losses.items():
             if extra_loss_key not in extra_loss_mts:
@@ -345,7 +383,10 @@ class TestTimeTrainer(Trainer):
         phase: str,
     ):  
         teacher.eval()
-        
+    #     feats = {}
+    #     h_enc = model.image_encoder.register_forward_hook(
+    #     lambda m,i,o: feats.setdefault("enc", o.detach())
+    # )
         print(f'Checking for generator')
         results = self.generate_batch_views(batch=batch, transforms =self.transforms)
         batch = self.norm_views(batch)[0]
@@ -353,18 +394,46 @@ class TestTimeTrainer(Trainer):
         targets = batch.masks
         outputs_batch = []
         print(f'batch information: {batch}')
-        outputs = model(batch)
+        outputs = model(batch)  
         outputs_batch.append(outputs)
-        
-        consave = f'{self.logging_conf.log_dir}/con'
-        os.makedirs(consave, exist_ok=True)
-        # con_outs = results[3].img_batch
-        # for i in range(len(con_outs)):
-        #         save_image(con_outs[i], f'{consave}/{i}.png')
+
+        feats = {}
+
+        def _save_enc(_m, _inp, out):
+            # SAM/SAM2 encoders usually return a Tensor; if it's a tuple, take the first.
+            
+            out = out['vision_features'] if isinstance(out, dict) and 'vision_features' in out else out
+            print(f'Inside the save enc function{out.shape}')
+            feats["enc"] = out.detach()
+
+        def _save_dec(_m, _inp, out):
+            print(f'The output from the decoder {out}')
+            
+            print(f'Inside the save dec function{out.shape}')
+            feats["dec"] = out.detach()
+
+        h_enc = model.image_encoder.register_forward_hook(_save_enc)
+        h_dec = model.sam_mask_decoder.penultimate_tap.register_forward_hook(_save_dec)
+        try:
+            outputs = model(batch)                # your existing forward
+        finally:
+            h_enc.remove()      
+            h_dec.remove()                  # always clean up
+
+        encoder_feats = feats.get("enc")     
+        decoder_feats = feats.get("dec")     # shape typically [B, 256, 64, 64]
+        outputs_batch.append(outputs)
+        print(f'Encoder features shape: {encoder_feats.shape}')
+        print(f'Decoder features shape: {decoder_feats.shape}')
+
 
         with torch.no_grad():
             outputs_anchor = teacher(batch)
+
+
             outputs_batch.append(outputs_anchor)
+
+
        
         for i in range(len(results)):
             aug_outs = model(results[i])
@@ -373,22 +442,58 @@ class TestTimeTrainer(Trainer):
             outputs_batch.append(aug_outs)
 
         batch_size = len(batch.img_batch)
-        
+
+        encoder_feats = encoder_feats.detach().float().cpu()
+        decoder_feats = decoder_feats.detach().float().cpu()
+        encoder_feats, (Ne, He, We) = feats_pixels_as_samples(encoder_feats)
+        decoder_feats, (Nd, Hd, Wd) = feats_pixels_as_samples(decoder_feats)
+
+        if self.epoch == 0:
+            self.pca_enc = PCA(n_components=2, random_state=0).fit(encoder_feats)
+            self.pca_dec = PCA(n_components=2, random_state=0).fit(decoder_feats)
+
+        # compute_class_separation(encoder_feats, decoder_feats, targets, self.epoch)
         self.log_validation_image(outputs, targets, self.logging_conf.log_dir, 'outs' )
 
         print(f'batch size {batch.img_batch.shape, len(outputs), len(outputs[0])} and shape of targets: {targets.shape}')
         
-
-        # batch_size = len(batch.img_batch)
+        # decoder_feats = 
+        self.compute_class_separation(encoder_feats, decoder_feats, targets, self.epoch, self.pca_enc, self.pca_dec)
+        batch_size = len(batch.img_batch)
 
         key = batch.dict_key  # key for dataset
 
         loss = self.loss[key](outputs_batch)
+
+
+
+        params = [p for p in self.model.parameters() if p.requires_grad]
+        
+        Loss_1 = loss["loss_mask"]
+        Loss_2 = loss["loss_dice"]
+        Loss_3 = loss["loss_iou"]
+
+        print(f'This is the losses{Loss_1} and {Loss_2} and {Loss_3}')
+        print(f'Requires grad: Loss1 {Loss_1.requires_grad}, Loss2 {Loss_2.requires_grad}, Loss3 {Loss_3.requires_grad}')
+
+                # print(f'This is the losses{losses.items()}')
+        with torch.cuda.amp.autocast(enabled=False):
+            g1 = grad_vec(Loss_1, params)
+            g2 = grad_vec(Loss_2, params)
+            g3 = grad_vec(Loss_3, params)
+
+        n1 = g1.norm()
+        n2 = g2.norm()
+        n3 = g3.norm()
+        cos = (g1 @ g2) / (n1.clamp_min(1e-12) * n2.clamp_min(1e-12))
+        print(f"||∇L1||={float(n1):.3e}  ||∇L2||={float(n2):.3e}  ||∇L3||={float(n3):.3e}  cos={float(cos):.4f}")
         
         
         loss_str = f"Losses/{phase}_{key}_loss"
 
         loss_log_str = os.path.join("Step_Losses", loss_str)
+
+
 
         # loss contains multiple sub-components we wish to log
         step_losses = {}
@@ -509,6 +614,7 @@ class TestTimeTrainer(Trainer):
         os.makedirs(savepaths, exist_ok=True)
         print(f'Check unique: {target.unique(), target.shape}')
         targets_onehot = nn.functional.one_hot(target.long(), 4)
+        print(f'Check shape of one_hot: {targets_onehot.shape}')
         targets_onehot = targets_onehot.permute(0, 1, 4, 2, 3).float()
         
         # targets_onehot = targets_onehot[:, 1:, :, :]  # drop channel 0
@@ -585,6 +691,108 @@ class TestTimeTrainer(Trainer):
                     total_mask[:,:, :, out_frame_idx] = out_mask
         return total_mask
     
+    def grab_image_encodings(self):
+        return self.model.image_encoder
+    
+    def compute_class_separation(self,
+        encoder_feats,
+        decoder_feats,
+        labels,
+        epoch,
+        pca_enc,
+        pca_dec,
+        ):
+        """
+        Compute class separation on SAM2 features.
+
+        Steps:
+        2) Downsample labels to feature-map size (NEAREST).
+        3) Flatten features to (N,C) and L2-normalize; build (N,) labels.
+        4) Class-balanced sample (per_class_max).
+        5) Compute separation metrics:
+            - Between-class uniformity (↓ better)
+            - Prototype margin (↑ better), off-diag cosine (↓)
+            - Fisher ratio (↑), silhouette (↑)
+        6) (Optional) PCA/UMAP for visualization and save plots.
+        7) Save a CSV row with metrics; return metrics dict(s).
+        """
+        print(f'encoder_feats shape: {encoder_feats.shape}')
+        print(f'decoder_feats shape: {decoder_feats.shape}')
+        print(f'labels shape: {labels.shape}')
+
+        # Downsample labels 
+
+        labels_enc = nn.functional.interpolate(
+        labels.float(),
+        size=(32, 32),   # or use scale_factor=0.5
+        mode="nearest"
+        ).squeeze(1).long()  
+
+        labels_dec = nn.functional.interpolate(
+        labels.float(),
+        size=(128, 128),   # or use scale_factor=0.5
+        mode="nearest"
+        ).squeeze(1).long()  
+        print(f'Downsampled labels shape: {labels_enc.shape}') 
+        print(f'Downsampled labels shape: {labels_dec.shape}')
+
+        # Pca on features and plot
+        # B, C, H, W = encoder_feats.shape
+
+        encoder_feats_pca = pca_enc.transform(encoder_feats)  # [B*H*W, 2]
+
+        # Back to [B, 2, H, W]
+        encoder_feats_pca = torch.from_numpy(encoder_feats_pca).to(encoder_feats.device)
+        # encoder_feats_pca = encoder_feats_pca.view(B, H, W, 2).permute(0, 3, 1, 2)
+
+        print(f'PCA reduced encoder features shape: {encoder_feats_pca.shape}')
+
+        # Select 
+
+        vecs, labs = gather_class_pixels(encoder_feats_pca, labels_enc, ignore_index=None)
+        print(f'PCA reduced encoder features shape: {vecs.shape, labs.shape}')
+
+        plt.figure(figsize=(6,6))
+        scatter = plt.scatter(vecs[:,0], vecs[:,1], c=labs.numpy(), cmap="tab10", s=1, alpha=0.5)
+        plt.colorbar(scatter, ticks=range(labs.max().item()+1), label="class id")
+        plt.title("Per-pixel encoder vectors projected by PCA")
+        plt.savefig(f"encoder_vectors_pca_epoch_con_{epoch}.png", dpi=300, bbox_inches="tight")
+        plt.show()
+
+        # B, C, H, W = decoder_feats.shape
+        # decoder_feats_flat = decoder_feats.permute(0, 2, 3, 1).reshape(-1, C)  # [B*H*W, C]
+
+        # Fit PCA on the channel dimension
+        
+        decoder_feats_pca = pca_dec.transform(decoder_feats)  # [B*H*W, 2]
+
+        # Back to [B, 2, H, W]
+        decoder_feats_pca = torch.from_numpy(decoder_feats_pca).to(decoder_feats.device)
+        # decoder_feats_pca = decoder_feats_pca.view(B, H, W, 2).permute(0, 3, 1, 2)
+
+        print(f'PCA reduced decoder features shape: {decoder_feats_pca.shape}')
+
+        vecs, labs = gather_class_pixels(decoder_feats_pca, labels_dec[-1], ignore_index=None)
+
+        print(f'PCA reduced decoder features shape: {vecs.shape, labs.shape, labs.unique()}')
+        plt.figure(figsize=(6,6))
+        scatter = plt.scatter(vecs[:,0], vecs[:,1], c=labs.numpy(), cmap="tab10", s=1, alpha=0.5)
+        plt.colorbar(scatter, ticks=range(labs.max().item()+1), label="class id")
+        plt.title("Per-pixel decoder vectors projected by PCA")
+        plt.savefig(f"decoder_vectors_pca_epoch_con_{epoch}.png", dpi=300, bbox_inches="tight")
+        plt.show()
+
+        intra = intra_class_distance(decoder_feats_pca, labs, 4)
+        inter = inter_class_distance(decoder_feats_pca, labs, 4)
+        ratio = inter / (intra + 1e-6)
+        print(f"Intra: {intra:.4f}, Inter: {inter:.4f}, Ratio: {ratio:.4f}")
+        log_distances_to_txt(intra, inter, ratio, path=f"{self.logging_conf.log_dir}/distances_con.txt", step=epoch)
+        return
+    
+
+    def full_validation(self):
+        pass
+    
 def colorize_mask(mask, palette=None):
     """mask: [H,W] int tensor with class IDs"""
     if palette is None:
@@ -601,3 +809,64 @@ def colorize_mask(mask, palette=None):
     h,w = mask.shape
     mask_rgb = palette[mask.flatten()].view(h,w,3).permute(2,0,1)  # [3,H,W]
     return mask_rgb
+
+
+def grad_vec(loss, params):
+    gs = torch.autograd.grad(loss, params, retain_graph=True, allow_unused=True)
+    vec = [g.detach().flatten() for g in gs if g is not None]
+    return torch.cat(vec) if vec else None
+
+
+
+
+def gather_class_pixels(feats, labels, ignore_index=None):
+
+
+    labs = labels.reshape(-1)                     # [B*H*W]
+    if ignore_index is not None:
+        mask = labs != ignore_index
+        feats = feats[mask]
+        labs = labs[mask]
+    return feats, labs.cpu()
+
+def feats_pixels_as_samples(encoder_feats: torch.Tensor):
+
+    with torch.no_grad():
+        feats = encoder_feats.detach().float().cpu()     # move to CPU
+    N, C, H, W = feats.shape
+    # pixels as samples, channels as features
+    X = feats.permute(0, 2, 3, 1).reshape(N*H*W, C).numpy()  # [N*H*W, C]
+    return X, (N, H, W)
+
+
+def intra_class_distance(f_flat, y_flat, num_classes):
+    dists = []
+    for c in range(1,num_classes):
+        mask = (y_flat == c)
+        if mask.sum() > 1:
+            f_c = f_flat[mask]
+            centroid = f_c.mean(dim=0, keepdim=True)   # (1,C)
+            dist = (f_c - centroid).pow(2).sum(dim=1).mean()
+            dists.append(dist.item())
+    return sum(dists) / len(dists)
+
+
+def inter_class_distance(f_flat, y_flat, num_classes):
+    centroids = []
+    for c in range(1, num_classes):
+        mask = (y_flat == c)
+        if mask.sum() > 0:
+            f_c = f_flat[mask]
+            centroids.append(f_c.mean(dim=0))
+    centroids = torch.stack(centroids)   # (K,C)
+    # pairwise squared distances
+    dmat = torch.cdist(centroids, centroids, p=2)  # (K,K)
+    return dmat.mean().item()
+
+
+def log_distances_to_txt(intra, inter, ratio, path="distances.txt", step=None):
+    with open(path, "a") as f:
+        if step is not None:
+            f.write(f"Step {step}: Intra={intra:.4f}, Inter={inter:.4f}, Ratio={ratio:.4f}\n")
+        else:
+            f.write(f"Intra={intra:.4f}, Inter={inter:.4f}, Ratio={ratio:.4f}\n")

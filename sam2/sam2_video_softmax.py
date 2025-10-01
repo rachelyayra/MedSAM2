@@ -949,6 +949,7 @@ class SAM2VideoPredictorNPZ(SAM2Base):
 
         # point and mask should not appear as input simultaneously on the same frame
         assert point_inputs is None or mask_inputs is None
+        print(f'At Frame {frame_idx} Point inputs: {point_inputs}, Mask inputs: {mask_inputs}')
         current_out = self.track_step(
             frame_idx=frame_idx,
             is_init_cond_frame=is_init_cond_frame,
@@ -971,6 +972,7 @@ class SAM2VideoPredictorNPZ(SAM2Base):
         if maskmem_features is not None:
             maskmem_features = maskmem_features.to(torch.bfloat16)
             maskmem_features = maskmem_features.to(storage_device, non_blocking=True)
+        
         pred_masks_gpu = current_out["pred_masks"]
         print(f'Pred masks gpu shape: {pred_masks_gpu.shape}')
         # potentially fill holes in the predicted masks

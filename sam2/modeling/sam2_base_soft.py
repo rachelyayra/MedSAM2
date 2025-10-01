@@ -9,6 +9,7 @@ import torch.distributed
 import torch.nn.functional as F
 
 from torch.nn.init import trunc_normal_
+from torchvision.utils import save_image
 
 from sam2.modeling.sam.mask_decoder import MaskDecoder
 from sam2.modeling.sam.prompt_encoder import PromptEncoder
@@ -361,6 +362,7 @@ class SAM2Base(torch.nn.Module):
             ious,
             sam_output_tokens,
             object_score_logits,
+            upscaled_embedding,
         ) = self.sam_mask_decoder(
             image_embeddings=backbone_features,
             image_pe=self.sam_prompt_encoder.get_dense_pe(),
@@ -428,6 +430,7 @@ class SAM2Base(torch.nn.Module):
             high_res_masks,
             obj_ptr,
             object_score_logits,
+            upscaled_embedding
         )
 
     def _use_mask_as_output(self, backbone_features, high_res_features, mask_inputs):
@@ -483,7 +486,7 @@ class SAM2Base(torch.nn.Module):
             )
         else:
             # produce an object pointer using the SAM decoder from the mask input
-            _, _, _, _, _, obj_ptr, _ = self._forward_sam_heads(
+            _, _, _, _, _, obj_ptr, _, _ = self._forward_sam_heads(
                 backbone_features=backbone_features,
                 mask_inputs=self.mask_downsample(mask_inputs_float),
                 high_res_features=high_res_features,
@@ -926,18 +929,26 @@ class SAM2Base(torch.nn.Module):
             high_res_masks,
             obj_ptr,
             object_score_logits,
+            upscaled_embedding,
         ) = sam_outputs
         if self.pred_option:
-            probs  = torch.softmax(low_res_masks, dim=1) 
-            labels = probs.argmax(dim=1)              # [B,H,W], ints {0..3}
+            for k in range(high_res_masks.shape[1]):
+                save_image(high_res_masks[:,k], f'high_res_mask_frame_{frame_idx}_{k}.png')
+
+            probs  = torch.softmax(low_res_masks, dim=1)
+            labels = probs.argmax(dim=1)            # [B,H,W], ints {0..3}
             low_res_masks = F.one_hot(labels, num_classes=4).permute(0,3,1,2).float()
 
-            probs_h  = torch.softmax(high_res_masks, dim=1) 
-            labels_h = probs_h.argmax(dim=1)              # [B,H,W], ints {0..3}
+            probs_h  = torch.softmax(high_res_masks, dim=1)
+            labels_h = probs_h.argmax(dim=1)             # [B,H,W], ints {0..3}
             high_res_masks = F.one_hot(labels_h, num_classes=4).permute(0,3,1,2).float()
+            margin_rep = margins_report(high_res_masks)
+            print(f'Margin report: {margin_rep}')
+
+            save_image(labels_h[0].float(), f'high_res_mask_final_{frame_idx}.png')
 
         print(f'The pred mask shapes: {low_res_masks.shape}')
-        current_out["pred_masks"] = low_res_masks
+        current_out["pred_masks"] = high_res_masks
         current_out["pred_masks_high_res"] = high_res_masks
         current_out["obj_ptr"] = obj_ptr
         if not self.training:
@@ -990,3 +1001,73 @@ class SAM2Base(torch.nn.Module):
         # don't overlap (here sigmoid(-10.0)=4.5398e-05)
         pred_masks = torch.where(keep, pred_masks, torch.clamp(pred_masks, max=-10.0))
         return pred_masks
+
+def argmax_with_bg_margin(logits: torch.Tensor, *, bg_idx: int = 0, delta: float = 0.3):
+    """
+    logits: (B,C,H,W) or (B,C). Returns (B,H,W) int map (or (B,) for 2D).
+    If best FG logit beats BG by >= delta, choose that FG; else plain argmax.
+    """
+    z  = logits
+    bg = z[:, bg_idx]                          # (B,H,W)
+    z_fg = z.clone()
+    z_fg[:, bg_idx] = float('-inf')            # mask BG from FG max
+    fg_val, fg_cls = z_fg.max(dim=1)           # best FG logit & class
+    y_plain = z.argmax(dim=1)                  # vanilla argmax
+    prefer_fg = (fg_val - bg) >= delta
+    y = torch.where(prefer_fg, fg_cls, y_plain)
+    return y
+
+def per_pixel_zscore(logits: torch.Tensor, eps=1e-6):
+    mu = logits.mean(dim=1, keepdim=True)
+    sd = logits.std(dim=1, keepdim=True).clamp_min(eps)
+    return (logits - mu) / sd
+
+# usage
+
+def margins_report(logits, bg_idx=0):
+    # logits: (B,C,H,W)
+    z = logits
+    B,C,H,W = z.shape
+
+    # top-1 / top-2 logits & classes
+    top2_vals, top2_idx = z.topk(2, dim=1)        # (B,2,H,W)
+    top1, top2 = top2_vals[:,0], top2_vals[:,1]   # (B,H,W)
+    yhat = top2_idx[:,0]                          # (B,H,W)
+    gap_all = (top1 - top2)                       # (B,H,W)
+
+    # best FG vs BG margin
+    z_fg = z.clone()
+    z_fg[:, bg_idx] = float('-inf')
+    fg_best, fg_cls = z_fg.max(dim=1)             # (B,H,W)
+    bg_logit = z[:, bg_idx]                       # (B,H,W)
+    margin_fg_bg = fg_best - bg_logit             # >0 means FG beats BG
+
+    # probabilities (for confidence/overlap)
+    z_last = z.movedim(1, -1)                     # (B,H,W,C)
+    lse = torch.logsumexp(z_last, dim=-1)         # (B,H,W)
+    p1 = (top1 - lse).exp()
+    p2 = (top2 - lse).exp()
+
+    report = {
+        "frac_pred_BG": float((yhat==bg_idx).float().mean()),
+        "mean_top_gap": float(gap_all.mean()),
+        "p25_top_gap":  float(gap_all.quantile(0.25)),
+        "mean_fg_bg_margin": float(margin_fg_bg.mean()),
+        "p25_fg_bg_margin":  float(margin_fg_bg.quantile(0.25)),
+        "frac_BG_over_fg_close(<0.2)": float(((yhat==bg_idx) & (margin_fg_bg>-0.2)).float().mean()),
+        "mean_p1": float(p1.mean()),
+        "mean_p2": float(p2.mean()),
+        "overlap_rate(p2>0.2)": float((p2>0.2).float().mean()),
+    }
+    return report, gap_all, margin_fg_bg, yhat, p1, p2
+
+def bias_correct_bg(logits: torch.Tensor, bg_idx: int = 0, bias: float = 0.0):
+    """
+    Subtract a constant bias from the background logit channel.
+    logits: (B,C,H,W)
+    bg_idx: background class index
+    bias: how much to subtract (positive number reduces BG dominance)
+    """
+    z = logits.clone()
+    z[:, bg_idx] = z[:, bg_idx] - bias
+    return z

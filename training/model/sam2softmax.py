@@ -352,6 +352,8 @@ class SAM2Train(SAM2Base):
                 )
 
             # Get output masks based on this frame's prompts and previous memory
+
+            
             current_out = self.track_step(
                 frame_idx=stage_id,
                 is_init_cond_frame=stage_id in init_cond_frames,
@@ -429,6 +431,7 @@ class SAM2Train(SAM2Base):
             high_res_masks,
             obj_ptr,
             object_score_logits,
+            upscaled_embedding,
         ) = sam_outputs
 
         current_out["multistep_pred_masks"] = low_res_masks
@@ -438,6 +441,7 @@ class SAM2Train(SAM2Base):
         current_out["multistep_pred_ious"] = [ious]
         current_out["multistep_point_inputs"] = [point_inputs]
         current_out["multistep_object_score_logits"] = [object_score_logits]
+        current_out["multistep_upscaled_embeddings"] = [upscaled_embedding]
         # Optionally, sample correction points iteratively to correct the mask
         if frame_idx in frames_to_add_correction_pt:
             point_inputs, final_sam_outputs = self._iter_correct_pt_sampling(
@@ -452,6 +456,7 @@ class SAM2Train(SAM2Base):
                 low_res_masks,
                 high_res_masks,
                 object_score_logits,
+                upscaled_embedding,
                 current_out,
             )
             (
@@ -462,6 +467,7 @@ class SAM2Train(SAM2Base):
                 high_res_masks,
                 obj_ptr,
                 object_score_logits,
+                upscaled_embedding,
             ) = final_sam_outputs
         # Use the final prediction (after all correction steps for output and eval)
         current_out["pred_masks"] = low_res_masks
@@ -494,6 +500,7 @@ class SAM2Train(SAM2Base):
         low_res_masks,
         high_res_masks,
         object_score_logits,
+        upscaled_embedding,
         current_out,
     ):
 
@@ -505,6 +512,7 @@ class SAM2Train(SAM2Base):
         all_pred_ious = [ious]
         all_point_inputs = [point_inputs]
         all_object_score_logits = [object_score_logits]
+        all_upscaled_embeddings = [upscaled_embedding]
         # masks_grouped = gt_masks.view(-1, 3, *gt_masks.shape[-2:])  # Group every 3
 
             # Sum across the grouped dimension (dim=1)
@@ -567,6 +575,7 @@ class SAM2Train(SAM2Base):
                 high_res_masks,
                 _,
                 object_score_logits,
+                upscaled_embedding,
             ) = sam_outputs
             all_pred_masks.append(low_res_masks)
             all_pred_high_res_masks.append(high_res_masks)
@@ -575,6 +584,7 @@ class SAM2Train(SAM2Base):
             all_pred_ious.append(ious)
             all_point_inputs.append(point_inputs)
             all_object_score_logits.append(object_score_logits)
+            all_upscaled_embeddings.append(upscaled_embedding)
 
         # Concatenate the masks along channel (to compute losses on all of them,
         # using `MultiStepIteractiveMasks`)
@@ -587,5 +597,6 @@ class SAM2Train(SAM2Base):
         current_out["multistep_pred_ious"] = all_pred_ious
         current_out["multistep_point_inputs"] = all_point_inputs
         current_out["multistep_object_score_logits"] = all_object_score_logits
+        current_out["multistep_upscaled_embeddings"] = all_upscaled_embeddings
         
         return point_inputs, sam_outputs

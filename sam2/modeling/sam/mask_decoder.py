@@ -101,6 +101,8 @@ class MaskDecoder(nn.Module):
             if pred_obj_scores_mlp:
                 self.pred_obj_score_head = MLP(transformer_dim, transformer_dim, 1, 3)
 
+        self.penultimate_tap = nn.Identity()
+
         # When outputting a single mask, optionally we can dynamically fall back to the best
         # multimask output token if the single mask output token gives low stability scores.
         self.dynamic_multimask_via_stability = dynamic_multimask_via_stability
@@ -133,7 +135,7 @@ class MaskDecoder(nn.Module):
           torch.Tensor: batched predictions of mask quality
           torch.Tensor: batched SAM token for mask output
         """
-        masks, iou_pred, mask_tokens_out, object_score_logits = self.predict_masks(
+        masks, iou_pred, mask_tokens_out, object_score_logits, upscaled_embedding = self.predict_masks(
             image_embeddings=image_embeddings,
             image_pe=image_pe,
             sparse_prompt_embeddings=sparse_prompt_embeddings,
@@ -165,7 +167,7 @@ class MaskDecoder(nn.Module):
 
         # Prepare output
         print(f'Print the the multimask: {masks.shape}')
-        return masks, iou_pred, sam_tokens_out, object_score_logits
+        return masks, iou_pred, sam_tokens_out, object_score_logits, upscaled_embedding
 
     def predict_masks(
         self,
@@ -226,6 +228,8 @@ class MaskDecoder(nn.Module):
             upscaled_embedding = act1(ln1(dc1(src) + feat_s1))
             upscaled_embedding = act2(dc2(upscaled_embedding) + feat_s0)
 
+        upscaled_embedding = self.penultimate_tap(upscaled_embedding)
+
         hyper_in_list: List[torch.Tensor] = []
         for i in range(self.num_mask_tokens):
             hyper_in_list.append(
@@ -261,7 +265,7 @@ class MaskDecoder(nn.Module):
         print("  masks           :", masks.requires_grad, type(masks.grad_fn).__name__ if masks.grad_fn else None)
 
 
-        return masks, iou_pred, mask_tokens_out, object_score_logits
+        return masks, iou_pred, mask_tokens_out, object_score_logits, upscaled_embedding
 
     def _get_stability_scores(self, mask_logits):
         """

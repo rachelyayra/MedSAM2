@@ -4,12 +4,12 @@ scratch:
   resolution: 512
   train_video_batch_size: 1
   num_train_workers: 0
-  num_frames: 4
+  num_frames: 8
   max_num_objects: 5
   base_lr: 5.0e-5
   vision_lr: 3.0e-5
   phases_per_epoch: 1
-  num_epochs: 15
+  num_epochs: 10
 
 # Video transforms
 
@@ -54,9 +54,9 @@ vos:
         #   saturation: 0.05
         #   hue: null
         - _target_: training.dataset.transforms.ToTensorAPI
-        - _target_: training.dataset.transforms.NormalizeAPI
-          mean: [0.485, 0.456, 0.406]
-          std: [0.229, 0.224, 0.225]
+        # - _target_: training.dataset.transforms.NormalizeAPI
+        #   mean: [0.485, 0.456, 0.406]
+        #   std: [0.229, 0.224, 0.225]
 
   val_transforms:
     - _target_: training.dataset.transforms.ComposeAPI
@@ -88,9 +88,9 @@ vos:
         #   saturation: 0.05
         #   hue: null
         - _target_: training.dataset.transforms.ToTensorAPI
-        - _target_: training.dataset.transforms.NormalizeAPI
-          mean: [0.485, 0.456, 0.406]
-          std: [0.229, 0.224, 0.225]
+        # - _target_: training.dataset.transforms.NormalizeAPI
+        #   mean: [0.485, 0.456, 0.406]
+        #   std: [0.229, 0.224, 0.225]
 trainer:
   _target_: testtime_adaptation.testtime_trainer.TestTimeTrainer
   mode: train
@@ -358,10 +358,10 @@ trainer:
 
   loss:
     all:
-      _target_: training.loss_fns.MultiStepSingleTTAConMasksAndIous
+      _target_: training.loss_fns.MultiStepSoftMaxTTAConMasksAndIous
       weight_dict:
         loss_mask: 1
-        loss_dice: 1
+        loss_dice: 0.2
         loss_iou: 0
         loss_class: 0
       supervise_all_iou: true
@@ -396,13 +396,13 @@ trainer:
 
       state_dict:
         _target_: training.utils.checkpoint_utils.load_checkpoint_and_apply_kernels
-        checkpoint_path: /scratch_net/ken/radjoe/Projects/Experiments/SAMEXP/logs/decoder_only_augs/checkpoints/checkpoint.pt # PATH to SAM 2.1 checkpoint
+        checkpoint_path: /scratch_net/ken/radjoe/Projects/Experiments/SAMEXP/logs/decoder_only/checkpoints/checkpoint_80.pt # PATH to SAM 2.1 checkpoint
         ckpt_state_dict_keys: ['model']
 
 launcher:
   num_nodes: 1
   gpus_per_node: 4
-  experiment_log_dir: /scratch_net/ken/radjoe/Projects/Experiments/SAMEXP/logs/decoder_only_adapter_example_tta_africa # Path to log directory, defaults to ./sam2_logs/${config_name}
+  experiment_log_dir: /scratch_net/ken/radjoe/Projects/Experiments/SAMEXP/logs/tta_feature_check # Path to log directory, defaults to ./sam2_logs/${config_name}
 
 # SLURM args if running on a cluster
 submitit:

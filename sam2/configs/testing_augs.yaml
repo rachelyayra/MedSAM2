@@ -1,13 +1,12 @@
 # @package _global_
-
 scratch:
   resolution: 512
   train_video_batch_size: 16
   num_train_workers: 0
   num_frames: 8
   max_num_objects: 5
-  base_lr: 5.0e-5
-  vision_lr: 3.0e-5
+  base_lr: 5.0e-4
+  vision_lr: 3.0e-4
   phases_per_epoch: 1
   num_epochs: 1000
 
@@ -367,7 +366,7 @@ trainer:
       weight_dict:
         loss_mask: 20
         loss_dice: 1
-        loss_iou: 0
+        loss_iou: 10
         loss_class: 1
       supervise_all_iou: true
       iou_use_l1_loss: true

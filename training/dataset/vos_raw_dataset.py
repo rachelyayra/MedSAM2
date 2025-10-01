@@ -474,7 +474,7 @@ class BraTSSigDataset(VOSRawDataset):
         video_frame_path = os.path.join(self.folder_path, video_name)
         
         full_video = np.load(video_frame_path)
-        full_video = full_video[1:, :, :, :]
+        full_video = np.delete(full_video, 1, axis=0)
         label_name = video_name[:-8]
 
         for i in range(full_video.shape[0]):

@@ -2,12 +2,12 @@
 
 scratch:
   resolution: 512
-  train_video_batch_size: 16
+  train_video_batch_size: 2
   num_train_workers: 0
   num_frames: 8
   max_num_objects: 5
-  base_lr: 5.0e-4
-  vision_lr: 3.0e-4
+  base_lr: 5.0e-3
+  vision_lr: 3.0e-3
   phases_per_epoch: 1
   num_epochs: 1000
 
@@ -15,10 +15,10 @@ scratch:
 
 dataset:
   # PATHS to Dataset
-  img_folder: /scratch_net/ken/radjoe/BraTS/Training/images_UNN  # PATH to MOSE JPEGImages folder
-  gt_folder: /scratch_net/ken/radjoe/BraTS/Training/labels_UNN   # PATH to MOSE Annotations folder
-  val_folder: /scratch_net/ken/radjoe/BraTS/Validation/images_UNN  # PATH to MOSE JPEGImages folder
-  val_gt_folder: /scratch_net/ken/radjoe/BraTS/Validation/labels_UNN  # PATH to MOSE Annotations folder
+  img_folder: /scratch_net/ken/radjoe/BraTS/Sin_folder/images_UNN  # PATH to MOSE JPEGImages folder
+  gt_folder: /scratch_net/ken/radjoe/BraTS/Sin_folder/labels_UNN   # PATH to MOSE Annotations folder
+  val_folder: /scratch_net/ken/radjoe/BraTS/Sin_folder/images_UNN  # PATH to MOSE JPEGImages folder
+  val_gt_folder: /scratch_net/ken/radjoe/BraTS/Sin_folder/labels_UNN  # PATH to MOSE Annotations folder
   file_list_txt: null
   multiplier: 1
 
@@ -28,32 +28,34 @@ vos:
   train_transforms:
     - _target_: training.dataset.transforms.ComposeAPI
       transforms:
-        - _target_: training.dataset.transforms.RandomHorizontalFlip
-          consistent_transform: True
-        - _target_: training.dataset.transforms.RandomAffine
-          degrees: 25
-          shear: 20
-          image_interpolation: bilinear
-          consistent_transform: True
+        # - _target_: training.dataset.transforms.RandomHorizontalFlip
+        #   consistent_transform: True
+        # - _target_: training.dataset.transforms.RandomAffine
+        #   degrees: 25
+        #   shear: 20
+        #   image_interpolation: bilinear
+        #   consistent_transform: True
         - _target_: training.dataset.transforms.RandomResizeAPI
           sizes: ${scratch.resolution}
           square: true
           consistent_transform: True
-        - _target_: training.dataset.transforms.ColorJitter
-          consistent_transform: True
-          brightness: 0.1
-          contrast: 0.03
-          saturation: 0.03
-          hue: null
-        - _target_: training.dataset.transforms.RandomGrayscale
-          p: 0.05
-          consistent_transform: True
-        - _target_: training.dataset.transforms.ColorJitter
-          consistent_transform: False
-          brightness: 0.1
-          contrast: 0.05
-          saturation: 0.05
-          hue: null
+        # - _target_: training.dataset.transforms.TargetedEDETContrastReduce
+        #   consistent_transform: True
+        # - _target_: training.dataset.transforms.ColorJitter
+        #   consistent_transform: True
+        #   brightness: 0.1
+        #   contrast: 0.03
+        #   saturation: 0.03
+        #   hue: null
+        # - _target_: training.dataset.transforms.RandomGrayscale
+        #   p: 0.05
+        #   consistent_transform: True
+        # - _target_: training.dataset.transforms.ColorJitter
+        #   consistent_transform: False
+        #   brightness: 0.1
+        #   contrast: 0.05
+        #   saturation: 0.05
+        #   hue: null
         - _target_: training.dataset.transforms.ToTensorAPI
         - _target_: training.dataset.transforms.NormalizeAPI
           mean: [0.485, 0.456, 0.406]
@@ -236,7 +238,7 @@ trainer:
     # maximum 2 initial conditioning frames
     num_init_cond_frames_for_train: 1
     rand_init_cond_frames_for_train: True  # random 1~2
-    num_correction_pt_per_frame: 7
+    num_correction_pt_per_frame: 1
     use_act_ckpt_iterative_pt_sampling: false
     
 
@@ -404,7 +406,7 @@ trainer:
 launcher:
   num_nodes: 1
   gpus_per_node: 4
-  experiment_log_dir: /scratch_net/ken/radjoe/Projects/Experiments/SAMEXP/logs/decoder_only # Path to log directory, defaults to ./sam2_logs/${config_name}
+  experiment_log_dir: /scratch_net/ken/radjoe/Projects/Experiments/SAMEXP/logs/margin_test # Path to log directory, defaults to ./sam2_logs/${config_name}
 
 # SLURM args if running on a cluster
 submitit:
@@ -416,5 +418,3 @@ submitit:
   timeout_hour: 24
   name: null
   port_range: [10000, 65000]
-
-
