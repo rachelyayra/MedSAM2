@@ -36,7 +36,7 @@ class MaskDownSampler(nn.Module):
         num_layers = int(math.log2(total_stride) // math.log2(stride))
         assert stride**num_layers == total_stride
         self.encoder = nn.Sequential()
-        mask_in_chans, mask_out_chans = 1, 1
+        mask_in_chans, mask_out_chans = 4, 4
         for _ in range(num_layers):
             mask_out_chans = mask_in_chans * (stride**2)
             self.encoder.append(
@@ -149,6 +149,7 @@ class MemoryEncoder(nn.Module):
         self.mask_downsampler = mask_downsampler
 
         self.pix_feat_proj = nn.Conv2d(in_dim, in_dim, kernel_size=1)
+        self.mask_proj = nn.Conv2d(4, 1, kernel_size=1)
         self.fuser = fuser
         self.position_encoding = position_encoding
         self.out_proj = nn.Identity()
@@ -162,14 +163,15 @@ class MemoryEncoder(nn.Module):
         skip_mask_sigmoid: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         ## Process masks
-        # sigmoid, so that less domain shift from gt masks which are bool
-        if not skip_mask_sigmoid:
-            masks = F.sigmoid(masks)
+        # sigmoid, so that less domain shift from gt masks which are bool 
+        # convert to softmax
+        print(f'the input masks before: {masks.shape}, {masks.dtype}, {pix_feat.shape}')
         masks = self.mask_downsampler(masks)
-
+        print(f'the input masks after: {masks.shape}, {masks.dtype}')
         ## Fuse pix_feats and downsampled masks
         # in case the visual features are on CPU, cast them to CUDA
         pix_feat = pix_feat.to(masks.device)
+        # m = self.mask_proj(masks)   
         # print(f'the pixel feature: {pix_feat.shape}, masks: {masks.shape}')
 
         x = self.pix_feat_proj(pix_feat)

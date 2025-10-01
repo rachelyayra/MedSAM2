@@ -20,6 +20,8 @@ import torchvision.transforms.v2.functional as Fv2
 from PIL import Image as PILImage
 
 from torchvision.transforms import InterpolationMode
+from torchvision.utils import save_image
+from torchvision.transforms.functional import to_tensor, pil_to_tensor
 
 from training.utils.data_utils import VideoDatapoint
 
@@ -94,7 +96,7 @@ def resize(datapoint, index, size, max_size=None, square=False, v2=False):
 
     for obj in datapoint.frames[index].objects:
         if obj.segment is not None:
-            obj.segment = F.resize(obj.segment[None, None], size).squeeze()
+            obj.segment = F.resize(obj.segment[None, None], size, InterpolationMode.NEAREST).squeeze()
 
     h, w = size
     datapoint.frames[index].size = (h, w)
@@ -631,4 +633,176 @@ class RandomGaussianBlur:
                 # Sample sigma independently for each frame
                 sigma = random.uniform(self.sigma[0], self.sigma[1])
                 img.data = F.gaussian_blur(img.data, self.kernel_size, [sigma, sigma])
+        return datapoint
+
+class TargetedEDETContrastReduce:
+    """
+    Targeted, mask-aware contrast reduction for EDEMA (ED) and Enhancing Tumor (ET).
+
+    - For ED: reduces contrast on specified modalities (e.g., FLAIR/T2).
+    - For ET: reduces contrast on specified modalities (e.g., T1ce).
+
+    If consistent_transform=True, a single set of random params is sampled
+    and applied to all frames; otherwise, each frame samples its own params.
+
+    Args:
+        consistent_transform (bool): reuse same params across frames if True.
+        p (float): probability to apply the transform.
+        ed_modalities (tuple[int]): channels to affect for ED (default: FLAIR=2, T2=1).
+        et_modalities (tuple[int]): channels to affect for ET (default: T1ce=3).
+        ed_scale (tuple[float,float]): uniform range for multiplicative scale inside ED mask.
+        et_scale (tuple[float,float]): uniform range for multiplicative scale inside ET mask.
+        ed_gamma (tuple[float,float]): uniform range for gamma inside ED mask.
+        et_gamma (tuple[float,float]): uniform range for gamma inside ET mask.
+        eps (float): small number to avoid div/0 in per-channel normalization.
+    """
+
+    def __init__(
+        self,
+        consistent_transform: bool,
+        p: float = 0.5,
+        ed_modalities=(2, 1),      # FLAIR, T2 (adjust to your ordering)
+        et_modalities=(0,),        # T1ce
+        ed_scale=(0.7, 0.9),
+        et_scale=(0.7, 0.9),
+        ed_gamma=(0.9, 1.1),
+        et_gamma=(0.9, 1.1),
+        eps: float = 1e-6,
+    ):
+        self.consistent_transform = consistent_transform
+        self.p = float(p)
+        self.ed_modalities = tuple(ed_modalities)
+        self.et_modalities = tuple(et_modalities)
+        self.ed_scale = tuple(ed_scale)
+        self.et_scale = tuple(et_scale)
+        self.ed_gamma = tuple(ed_gamma)
+        self.et_gamma = tuple(et_gamma)
+        self.eps = float(eps)
+
+    # @torch.no_grad()
+    def _sample_params(self):
+        """Sample random (scale, gamma) for ED and ET."""
+        ed_scale = random.uniform(*self.ed_scale)
+        et_scale = random.uniform(*self.et_scale)
+        ed_gamma = random.uniform(*self.ed_gamma)
+        et_gamma = random.uniform(*self.et_gamma)
+        return ed_scale, ed_gamma, et_scale, et_gamma
+
+    def _ensure_hw_mask(self, m):
+        # Accept [H,W] or [1,H,W]; return [H,W] bool
+        if m is None:
+            return None
+        if m.dim() == 3 and m.size(0) == 1:
+            m = m[0]
+        return m.bool()
+
+    # @torch.no_grad()
+    def _apply_on_channel(self, ch, mask, scale, gamma):
+        """
+        ch: [H,W] float tensor (one modality)
+        mask: [H,W] bool tensor
+        """
+        if mask is None or not mask.any():
+            return ch
+
+        # Per-channel min-max norm to [0,1] for stable gamma
+        cmin = ch.amin(dim=(0, 1), keepdim=False)
+        cmax = ch.amax(dim=(0, 1), keepdim=False)
+        if (cmax - cmin) <= self.eps:
+            return ch  # nearly constant channel; skip
+
+        x = (ch - cmin) / (cmax - cmin + self.eps)    # [0,1]
+        x_aug = scale * torch.clamp(x ** gamma, 0.0, 1.0)
+        x_aug = x_aug * (cmax - cmin) + cmin          # back to original range
+
+        # Blend only inside mask
+        out = torch.where(mask, x_aug, ch)
+        return out
+    
+    def compute_balancing_scales(self, x, ed_mask, et_mask, alpha=0.5, smin=0.7, smax=1.3, ref='mean'):
+        """
+        x: [C,H,W] (or [B,C,H,W] with B==1); float in [0,1] preferred
+        ed_mask, et_mask: [H,W] bool
+        Returns (s_ed, s_et) scalars.
+        """
+        x = x.float()
+        if x.ndim == 4:
+            x = x[0]                     # make it [C,H,W]
+        
+        if ref == 'mean':
+            x_ref = x.mean(dim=0)        # [H,W] average over channels
+        elif isinstance(ref, int):        # pick a channel index
+            x_ref = x[ref]
+        else:
+            x_ref = x.mean(dim=0)
+
+        ed_mask = ed_mask.bool()
+        et_mask = et_mask.bool()
+        # (optional) squeeze masks like [1,H,W] -> [H,W]
+        if ed_mask.ndim == 3 and ed_mask.size(0) == 1: ed_mask = ed_mask.squeeze(0)
+        if et_mask.ndim == 3 and et_mask.size(0) == 1: et_mask = et_mask.squeeze(0)
+
+        # means inside regions
+        if ed_mask.any() and et_mask.any():
+            me = x_ref[ed_mask].mean().item()
+            mt = x_ref[et_mask].mean().item()
+            if me > 1e-6 and mt > 1e-6:
+                s_ed = (mt / me) ** alpha
+                s_et = (me / mt) ** alpha
+            else:
+                s_ed = s_et = 1.0
+        else:
+            s_ed = s_et = 1.0
+
+        s_ed = float(max(smin, min(s_ed, smax)))
+        s_et = float(max(smin, min(s_et, smax)))
+        return s_ed, s_et
+
+    @torch.no_grad()
+    def __call__(self, datapoint, **kwargs):
+        if random.random() > self.p:
+            return datapoint
+
+        if self.consistent_transform:
+            ed_scale, ed_gamma, et_scale, et_gamma = self._sample_params()
+
+        for idx in range(len(datapoint.frames)):
+            x = datapoint.frames[idx].data
+            x = x = pil_to_tensor(x)
+            # print(f'info on x: {x.shape}')
+            save_image(x.float()/255.0, f"before_{idx}.png")
+
+            # print(f'length of list: {datapoint.frames[idx].objects[0]}')
+            mask = datapoint.frames[idx].objects[0].segment
+
+            if mask is None:
+                print(f"Warning: No segmentation mask found for frame {idx}.")
+                continue
+
+            # boolean region masks from class labels
+            ed_mask = (mask == 1)
+            et_mask = (mask == 2)
+
+
+            # Apply ED reduction
+            ed_scale, et_scale = self.compute_balancing_scales(x, ed_mask, et_mask)
+            ed_gamma = 1.0
+            et_gamma = 1.0
+            if ed_mask.any():
+                for m in self.ed_modalities:
+                    if 0 <= m < x.size(0):
+                        x[m] = self._apply_on_channel(x[m], ed_mask, ed_scale, ed_gamma).to(x.dtype)
+
+            # Apply ET reduction
+            if et_mask.any():
+                for m in self.et_modalities:
+                    if 0 <= m < x.size(0):
+                        x[m] = self._apply_on_channel(x[m], et_mask, et_scale, et_gamma).to(x.dtype)
+            # print(f'Saving....')
+            # save_image(x.float()/255.0, f"after_{idx}.png")
+            # print(f'Saved!')
+            # back to PIL
+            x = F.to_pil_image(x)
+            datapoint.frames[idx].data.data = x
+
         return datapoint

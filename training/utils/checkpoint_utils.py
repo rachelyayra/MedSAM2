@@ -349,7 +349,12 @@ def load_state_dict_into_model(
     if checkpoint_kernels is not None:
         for f in checkpoint_kernels:
             state_dict = f(state_dict=state_dict)
-    missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+
+    filtered_dict = load_with_partial_overlaps(model, state_dict)
+
+    missing_keys, unexpected_keys = model.load_state_dict(filtered_dict, strict=False)
+
+
 
     check_load_state_dict_errors(
         missing_keys,
@@ -359,3 +364,30 @@ def load_state_dict_into_model(
         ignore_unexpected_keys=ignore_unexpected_keys,
     )
     return model
+
+def copy_overlap_(dst: torch.Tensor, src: torch.Tensor):
+    # Copy overlapping region only
+    slices = tuple(slice(0, min(d, s)) for d, s in zip(dst.shape, src.shape))
+    dst[slices].copy_(src[slices])
+
+def load_with_partial_overlaps(model, state_dict):
+    sd = state_dict
+    sd = { (k[7:] if k.startswith("module.") else k): v for k, v in sd.items() }
+
+    model_sd = model.state_dict()
+    for k, v in model_sd.items():
+        if k in sd:
+            src = sd[k]
+            if v.shape == src.shape:
+                v.copy_(src)
+            else:
+                # same ndim? try overlap copy
+                if v.ndim == src.ndim:
+                    print(f"[partial] {k}: {tuple(src.shape)} -> {tuple(v.shape)}")
+                    copy_overlap_(v, src)
+                else:
+                    print(f"[skip]    {k}: ndim mismatch {src.ndim} -> {v.ndim}")
+        else:
+            print(f"[new]     {k}: not in checkpoint")
+
+    return model_sd

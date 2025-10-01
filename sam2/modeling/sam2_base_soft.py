@@ -226,7 +226,7 @@ class SAM2Base(torch.nn.Module):
             mask_in_chans=16,
         )
         self.sam_mask_decoder = MaskDecoder(
-            num_multimask_outputs=3,
+            num_multimask_outputs=4,
             transformer=TwoWayTransformer(
                 depth=2,
                 embedding_dim=self.sam_prompt_embed_dim,
@@ -266,7 +266,7 @@ class SAM2Base(torch.nn.Module):
         point_inputs=None,
         mask_inputs=None,
         high_res_features=None,
-        multimask_output=False,
+        multimask_output=True,
         pred_option = False,
     ):
         """
@@ -310,6 +310,7 @@ class SAM2Base(torch.nn.Module):
         """
         B = backbone_features.size(0)
         device = backbone_features.device
+        
         assert backbone_features.size(1) == self.sam_prompt_embed_dim
         assert backbone_features.size(2) == self.sam_image_embedding_size
         assert backbone_features.size(3) == self.sam_image_embedding_size
@@ -318,6 +319,7 @@ class SAM2Base(torch.nn.Module):
         if point_inputs is not None:
             sam_point_coords = point_inputs["point_coords"]
             sam_point_labels = point_inputs["point_labels"]
+
             print(f'cooreds shape: {sam_point_coords.shape},{sam_point_labels.shape}, {B} ')
             assert sam_point_coords.size(0) == B and sam_point_labels.size(0) == B
         else:
@@ -329,6 +331,10 @@ class SAM2Base(torch.nn.Module):
         if mask_inputs is not None:
             # If mask_inputs is provided, downsize it into low-res mask input if needed
             # and feed it as a dense mask prompt into the SAM mask encoder
+            mask_inputs = mask_inputs[:, 1:].sum(dim = 1, keepdim=True)
+            mask_inputs = mask_inputs > 0
+            mask_inputs = mask_inputs.float()
+            print(f'mask shape: {mask_inputs.shape}, {B}')
             assert len(mask_inputs.shape) == 4 and mask_inputs.shape[:2] == (B, 1)
             if mask_inputs.shape[-2:] != self.sam_prompt_encoder.mask_input_size:
                 sam_mask_prompt = F.interpolate(
@@ -360,7 +366,7 @@ class SAM2Base(torch.nn.Module):
             image_pe=self.sam_prompt_encoder.get_dense_pe(),
             sparse_prompt_embeddings=sparse_embeddings,
             dense_prompt_embeddings=dense_embeddings,
-            multimask_output=multimask_output,
+            multimask_output=True,
             repeat_image=False,  # the image is already batched
             high_res_features=high_res_features,
         )
@@ -392,12 +398,12 @@ class SAM2Base(torch.nn.Module):
 
             if multimask_output:
                 # take the best mask prediction (with the highest IoU estimation)
-                best_iou_inds = torch.argmax(ious, dim=-1)
-                batch_inds = torch.arange(B, device=device)
-                low_res_masks = low_res_multimasks[batch_inds, best_iou_inds].unsqueeze(1)
-                high_res_masks = high_res_multimasks[batch_inds, best_iou_inds].unsqueeze(1)
-                if sam_output_tokens.size(1) > 1:
-                    sam_output_token = sam_output_tokens[batch_inds, best_iou_inds]
+                # best_iou_inds = torch.argmax(ious, dim=-1)
+                # batch_inds = torch.arange(B, device=device)
+                low_res_masks = low_res_multimasks
+                high_res_masks = high_res_multimasks
+                # if sam_output_tokens.size(1) > 1:
+                #     sam_output_token = sam_output_tokens[batch_inds, best_iou_inds]
             else:
                 low_res_masks, high_res_masks = low_res_multimasks, high_res_multimasks
 
@@ -430,6 +436,12 @@ class SAM2Base(torch.nn.Module):
         (same input and output shapes as in _forward_sam_heads above).
         """
         # Use -10/+10 as logits for neg/pos pixels (very close to 0/1 in prob after sigmoid).
+        # target one hot encodeed
+
+        mask_inputs = F.one_hot(mask_inputs.squeeze(1).long(), 4)
+        mask_inputs = mask_inputs.permute(0, 4, 1, 2)
+
+        # soft max logits
 
         out_scale, out_bias = 20.0, -10.0  # sigmoid(-10.0)=4.5398e-05
         print('here instead')
@@ -737,16 +749,23 @@ class SAM2Base(torch.nn.Module):
             )
         # scale the raw mask logits with a temperature before applying sigmoid
         binarize = self.binarize_mask_from_pts_for_mem_enc and is_mask_from_pts
-        if binarize and not self.training:
-            mask_for_mem = (pred_masks_high_res > 0).float()
-        else:
-            # apply sigmoid on the raw mask logits to turn them into range (0, 1)
-            mask_for_mem = torch.sigmoid(pred_masks_high_res)
-        # apply scale and bias terms to the sigmoid probabilities
-        if self.sigmoid_scale_for_mem_enc != 1.0:
-            mask_for_mem = mask_for_mem * self.sigmoid_scale_for_mem_enc
-        if self.sigmoid_bias_for_mem_enc != 0.0:
-            mask_for_mem = mask_for_mem + self.sigmoid_bias_for_mem_enc
+        
+        print(f'The thing is the memory encoder: {pred_masks_high_res.shape}, {B}, {C}, {H}, {W}')
+        p = torch.softmax(pred_masks_high_res, dim=1)  # [B,C,H,W]
+
+        # Per-class scale α and additive bias β (shape [C])
+        alpha = getattr(self, "prob_scale_for_mem_enc", None)  # e.g., tensor([1.0, 0.8, 1.2, 1.0])
+        beta  = getattr(self, "prob_bias_for_mem_enc",  None)  # small, >=0 preferred
+
+        if alpha is not None:
+            p = p * alpha.view(1, C, 1, 1)
+        if beta is not None:
+            p = p + beta.view(1, C, 1, 1)
+
+        # Keep on the simplex
+        p = torch.clamp(p, min=1e-8)
+        p = p / p.sum(dim=1, keepdim=True)
+        mask_for_mem = p
         maskmem_out = self.memory_encoder(
             pix_feat, mask_for_mem, skip_mask_sigmoid=True  # sigmoid already applied
         )
@@ -844,8 +863,9 @@ class SAM2Base(torch.nn.Module):
         pred_option = False,
     ):
         if run_mem_encoder and self.num_maskmem > 0:
-            if pred_option:
-                high_res_masks = high_res_masks.sum(dim=1)
+            # does 
+            # if pred_option:
+            #     high_res_masks = high_res_masks[:, 1:].sum(dim=1)
 
             high_res_masks_for_mem_enc = high_res_masks
             maskmem_features, maskmem_pos_enc = self._encode_new_memory(
@@ -907,6 +927,14 @@ class SAM2Base(torch.nn.Module):
             obj_ptr,
             object_score_logits,
         ) = sam_outputs
+        if self.pred_option:
+            probs  = torch.softmax(low_res_masks, dim=1) 
+            labels = probs.argmax(dim=1)              # [B,H,W], ints {0..3}
+            low_res_masks = F.one_hot(labels, num_classes=4).permute(0,3,1,2).float()
+
+            probs_h  = torch.softmax(high_res_masks, dim=1) 
+            labels_h = probs_h.argmax(dim=1)              # [B,H,W], ints {0..3}
+            high_res_masks = F.one_hot(labels_h, num_classes=4).permute(0,3,1,2).float()
 
         print(f'The pred mask shapes: {low_res_masks.shape}')
         current_out["pred_masks"] = low_res_masks

@@ -327,12 +327,15 @@ def construct_optimizer(
     """
     if param_allowlist is None:
         param_allowlist = {name for name, _ in model.named_parameters()}
+    print(f'Allowed list: {param_allowlist}')
 
     named_parameters = {
         name: param
         for name, param in model.named_parameters()
         if name in param_allowlist
     }
+
+    print(f'Named parameter list: {named_parameters}')
 
     if not options_conf:
         optimizer = hydra.utils.instantiate(optimizer_conf, named_parameters.values())

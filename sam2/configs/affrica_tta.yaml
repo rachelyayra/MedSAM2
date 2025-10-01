@@ -4,21 +4,21 @@ scratch:
   resolution: 512
   train_video_batch_size: 1
   num_train_workers: 0
-  num_frames: 1
+  num_frames: 8
   max_num_objects: 5
-  base_lr: 5.0e-5
-  vision_lr: 5.0e-5
+  base_lr: 5.0e-4
+  vision_lr: 3.0e-4
   phases_per_epoch: 1
-  num_epochs: 1000
+  num_epochs: 15
 
 # Video transforms
 
 dataset:
   # PATHS to Dataset
-  img_folder: /scratch_net/ken/radjoe/BraTS/Tests/images_UNN  # PATH to MOSE JPEGImages folder
-  gt_folder: /scratch_net/ken/radjoe/BraTS/Tests/labels_UNN   # PATH to MOSE Annotations folder
-  val_folder: /scratch_net/ken/radjoe/BraTS/Tests/images_UNN  # PATH to MOSE JPEGImages folder
-  val_gt_folder: /scratch_net/ken/radjoe/BraTS/Tests/labels_UNN  # PATH to MOSE Annotations folder
+  img_folder: /scratch_net/ken/radjoe/BraTS/TTA_Africa/images_UNN  # PATH to MOSE JPEGImages folder
+  gt_folder: /scratch_net/ken/radjoe/BraTS/TTA_Africa/labels_UNN   # PATH to MOSE Annotations folder
+  val_folder: /scratch_net/ken/radjoe/BraTS/TTA_Africa/images_UNN  # PATH to MOSE JPEGImages folder
+  val_gt_folder: /scratch_net/ken/radjoe/BraTS/TTA_Africa/labels_UNN  # PATH to MOSE Annotations folder
   file_list_txt: null
   multiplier: 1
 
@@ -33,8 +33,6 @@ vos:
         #   degrees: 25
         #   shear: 20
         #   image_interpolation: bilinear
-        #   consistent_transform: True
-        # - _target_: training.dataset.transforms.TargetedEDETContrastReduce
         #   consistent_transform: True
         - _target_: training.dataset.transforms.RandomResizeAPI
           sizes: ${scratch.resolution}
@@ -59,7 +57,6 @@ vos:
         - _target_: training.dataset.transforms.NormalizeAPI
           mean: [0.485, 0.456, 0.406]
           std: [0.229, 0.224, 0.225]
-
 
   val_transforms:
     - _target_: training.dataset.transforms.ComposeAPI
@@ -94,16 +91,15 @@ vos:
         - _target_: training.dataset.transforms.NormalizeAPI
           mean: [0.485, 0.456, 0.406]
           std: [0.229, 0.224, 0.225]
-
 trainer:
-  _target_: training.trainer.Trainer
-  mode: train_only
+  _target_: testtime_adaptation.testtime_trainer.TestTimeTrainer
+  mode: train
   max_epochs: ${times:${scratch.num_epochs},${scratch.phases_per_epoch}}
   accelerator: cuda
   seed_value: 123
 
   model:
-    _target_: training.model.sam2softmax.SAM2Train
+    _target_: testtime_adaptation.model.sam2_tta.SAM2TestTime
     image_encoder:
       _target_: sam2.modeling.backbones.image_encoder.ImageEncoder
       scalp: 1
@@ -128,7 +124,7 @@ trainer:
         fpn_interp_model: nearest
 
     freeze_image_encoder: true
-    # freeze_all: true
+    freeze_all: true
     
     memory_attention:
       _target_: sam2.modeling.memory_attention.MemoryAttention
@@ -138,7 +134,7 @@ trainer:
         _target_: sam2.modeling.memory_attention.MemoryAttentionLayer
         activation: relu
         dim_feedforward: 2048
-        dropout: 0.0
+        dropout: 0.1
         pos_enc_at_attn: false
         self_attention:
           _target_: sam2.modeling.sam.transformer.RoPEAttention
@@ -147,7 +143,7 @@ trainer:
           embedding_dim: 256
           num_heads: 1
           downsample_rate: 1
-          dropout: 0.0
+          dropout: 0.1
         d_model: 256
         pos_enc_at_cross_attn_keys: true
         pos_enc_at_cross_attn_queries: false
@@ -159,7 +155,7 @@ trainer:
           embedding_dim: 256
           num_heads: 1
           downsample_rate: 1
-          dropout: 0.0
+          dropout: 0.1
           kv_in_dim: 64
       num_layers: 4
 
@@ -195,6 +191,7 @@ trainer:
     sigmoid_scale_for_mem_enc: 20.0
     sigmoid_bias_for_mem_enc: -10.0
     use_mask_input_as_output_without_sam: true
+    # num_multimask_outputs : 
     # Memory
     directly_add_no_mem_embed: true
     no_obj_embed_spatial: true
@@ -235,9 +232,9 @@ trainer:
     rand_frames_to_correct_for_train: True  # random #init-cond-frame ~ 2
     add_all_frames_to_correct_as_cond: True  # when a frame receives a correction click, it becomes a conditioning frame (even if it's not initially a conditioning frame)
     # maximum 2 initial conditioning frames
-    num_init_cond_frames_for_train: 2
+    num_init_cond_frames_for_train: 1
     rand_init_cond_frames_for_train: True  # random 1~2
-    num_correction_pt_per_frame: 7
+    num_correction_pt_per_frame: 1
     use_act_ckpt_iterative_pt_sampling: false
     
 
@@ -259,11 +256,11 @@ trainer:
             _target_: training.dataset.utils.ConcatDataset
             datasets:
             # BraTS
-            - _target_: training.dataset.vos_dataset.VOSDataset
+            - _target_: testtime_adaptation.dataset.vos_dataset_tta.VOSDataset
               transforms: ${vos.train_transforms}
               training: true
               video_dataset:
-                _target_: training.dataset.vos_raw_dataset.BraTSSigDataset
+                _target_: training.dataset.vos_raw_dataset.BraTSRawDataset
                 img_folder: ${dataset.img_folder}
                 gt_folder: ${dataset.gt_folder}
                 file_list_txt: ${dataset.file_list_txt}
@@ -277,7 +274,7 @@ trainer:
       pin_memory: True
       drop_last: True
       collate_fn:
-        _target_: training.utils.data_utils.collate_fn
+        _target_: training.utils.data_utils.collate_fn_tta
         _partial_: true
         dict_key: all
 
@@ -296,7 +293,7 @@ trainer:
               transforms: ${vos.val_transforms}
               training: true
               video_dataset:
-                _target_: training.dataset.vos_raw_dataset.BraTSSigDataset
+                _target_: training.dataset.vos_raw_dataset.BraTSRawDataset
                 img_folder: ${dataset.val_folder}
                 gt_folder: ${dataset.val_gt_folder}
                 file_list_txt: ${dataset.file_list_txt}
@@ -310,7 +307,7 @@ trainer:
       pin_memory: True
       drop_last: false
       collate_fn:
-        _target_: training.utils.data_utils.collate_fn
+        _target_: training.utils.data_utils.collate_fn_tta
         _partial_: true
         dict_key: all
     
@@ -342,17 +339,17 @@ trainer:
         - scheduler:
             _target_: fvcore.common.param_scheduler.CosineParamScheduler
             start_value: ${scratch.base_lr}
-            end_value: ${scratch.base_lr}
+            end_value: ${divide:${scratch.base_lr},10}
         - scheduler:
             _target_: fvcore.common.param_scheduler.CosineParamScheduler
             start_value: ${scratch.vision_lr}
-            end_value: ${scratch.vision_lr}
+            end_value: ${divide:${scratch.vision_lr},10}
           param_names:
             - 'image_encoder.*'
       weight_decay:
         - scheduler:
             _target_: fvcore.common.param_scheduler.ConstantParamScheduler
-            value: 0.0
+            value: 0.1
         - scheduler:
             _target_: fvcore.common.param_scheduler.ConstantParamScheduler
             value: 0.0
@@ -362,12 +359,12 @@ trainer:
 
   loss:
     all:
-      _target_: training.loss_fns.MultiStepMultiSoftMaxMasksAndIous
+      _target_: training.loss_fns.MultiStepSingleTTAConMasksAndIous
       weight_dict:
-        loss_mask: 1
+        loss_mask: 2000
         loss_dice: 1
         loss_iou: 0
-        loss_class: 0
+        loss_class: 1
       supervise_all_iou: true
       iou_use_l1_loss: true
       pred_obj_scores: true
@@ -400,13 +397,13 @@ trainer:
 
       state_dict:
         _target_: training.utils.checkpoint_utils.load_checkpoint_and_apply_kernels
-        checkpoint_path: /scratch_net/ken/radjoe/Projects/SourceCode/MedSAM2/checkpoints/MedSAM2_latest.pt # PATH to SAM 2.1 checkpoint
+        checkpoint_path: /scratch_net/ken/radjoe/Projects/Experiments/SAMEXP/logs/full_finetuning/checkpoints/checkpoint_10.pt # PATH to SAM 2.1 checkpoint
         ckpt_state_dict_keys: ['model']
 
 launcher:
   num_nodes: 1
   gpus_per_node: 4
-  experiment_log_dir: /scratch_net/ken/radjoe/Projects/Experiments/SAMEXP/logs/decoder_only_smaller_sig # Path to log directory, defaults to ./sam2_logs/${config_name}
+  experiment_log_dir: /scratch_net/ken/radjoe/Projects/Experiments/SAMEXP/logs/africa_tta # Path to log directory, defaults to ./sam2_logs/${config_name}
 
 # SLURM args if running on a cluster
 submitit:
@@ -418,5 +415,3 @@ submitit:
   timeout_hour: 24
   name: null
   port_range: [10000, 65000]
-
-

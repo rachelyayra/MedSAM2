@@ -2,12 +2,12 @@
 
 scratch:
   resolution: 512
-  train_video_batch_size: 1
+  train_video_batch_size: 16
   num_train_workers: 0
-  num_frames: 1
+  num_frames: 8
   max_num_objects: 5
   base_lr: 5.0e-5
-  vision_lr: 5.0e-5
+  vision_lr: 3.0e-5
   phases_per_epoch: 1
   num_epochs: 1000
 
@@ -15,46 +15,47 @@ scratch:
 
 dataset:
   # PATHS to Dataset
-  img_folder: /scratch_net/ken/radjoe/BraTS/Tests/images_UNN  # PATH to MOSE JPEGImages folder
-  gt_folder: /scratch_net/ken/radjoe/BraTS/Tests/labels_UNN   # PATH to MOSE Annotations folder
-  val_folder: /scratch_net/ken/radjoe/BraTS/Tests/images_UNN  # PATH to MOSE JPEGImages folder
-  val_gt_folder: /scratch_net/ken/radjoe/BraTS/Tests/labels_UNN  # PATH to MOSE Annotations folder
+  img_folder: /scratch_net/ken/radjoe/BraTS/Training/images_UNN  # PATH to MOSE JPEGImages folder
+  gt_folder: /scratch_net/ken/radjoe/BraTS/Training/labels_UNN   # PATH to MOSE Annotations folder
+  val_folder: /scratch_net/ken/radjoe/BraTS/Validation/images_UNN  # PATH to MOSE JPEGImages folder
+  val_gt_folder: /scratch_net/ken/radjoe/BraTS/Validation/labels_UNN  # PATH to MOSE Annotations folder
   file_list_txt: null
   multiplier: 1
+
 
 # Video transforms
 vos:
   train_transforms:
     - _target_: training.dataset.transforms.ComposeAPI
       transforms:
-        # - _target_: training.dataset.transforms.RandomHorizontalFlip
-        #   consistent_transform: True
-        # - _target_: training.dataset.transforms.RandomAffine
-        #   degrees: 25
-        #   shear: 20
-        #   image_interpolation: bilinear
-        #   consistent_transform: True
-        # - _target_: training.dataset.transforms.TargetedEDETContrastReduce
-        #   consistent_transform: True
+        - _target_: training.dataset.transforms.RandomHorizontalFlip
+          consistent_transform: True
+        - _target_: training.dataset.transforms.RandomAffine
+          degrees: 25
+          shear: 20
+          image_interpolation: bilinear
+          consistent_transform: True
         - _target_: training.dataset.transforms.RandomResizeAPI
           sizes: ${scratch.resolution}
           square: true
           consistent_transform: True
-        # - _target_: training.dataset.transforms.ColorJitter
-        #   consistent_transform: True
-        #   brightness: 0.1
-        #   contrast: 0.03
-        #   saturation: 0.03
-        #   hue: null
-        # - _target_: training.dataset.transforms.RandomGrayscale
-        #   p: 0.05
-        #   consistent_transform: True
-        # - _target_: training.dataset.transforms.ColorJitter
-        #   consistent_transform: False
-        #   brightness: 0.1
-        #   contrast: 0.05
-        #   saturation: 0.05
-        #   hue: null
+        - _target_: training.dataset.transforms.TargetedEDETContrastReduce
+          consistent_transform: True
+        - _target_: training.dataset.transforms.ColorJitter
+          consistent_transform: True
+          brightness: 0.1
+          contrast: 0.03
+          saturation: 0.03
+          hue: null
+        - _target_: training.dataset.transforms.RandomGrayscale
+          p: 0.05
+          consistent_transform: True
+        - _target_: training.dataset.transforms.ColorJitter
+          consistent_transform: False
+          brightness: 0.1
+          contrast: 0.05
+          saturation: 0.05
+          hue: null
         - _target_: training.dataset.transforms.ToTensorAPI
         - _target_: training.dataset.transforms.NormalizeAPI
           mean: [0.485, 0.456, 0.406]
@@ -97,7 +98,7 @@ vos:
 
 trainer:
   _target_: training.trainer.Trainer
-  mode: train_only
+  mode: train
   max_epochs: ${times:${scratch.num_epochs},${scratch.phases_per_epoch}}
   accelerator: cuda
   seed_value: 123
@@ -138,7 +139,7 @@ trainer:
         _target_: sam2.modeling.memory_attention.MemoryAttentionLayer
         activation: relu
         dim_feedforward: 2048
-        dropout: 0.0
+        dropout: 0.1
         pos_enc_at_attn: false
         self_attention:
           _target_: sam2.modeling.sam.transformer.RoPEAttention
@@ -147,7 +148,7 @@ trainer:
           embedding_dim: 256
           num_heads: 1
           downsample_rate: 1
-          dropout: 0.0
+          dropout: 0.1
         d_model: 256
         pos_enc_at_cross_attn_keys: true
         pos_enc_at_cross_attn_queries: false
@@ -159,7 +160,7 @@ trainer:
           embedding_dim: 256
           num_heads: 1
           downsample_rate: 1
-          dropout: 0.0
+          dropout: 0.1
           kv_in_dim: 64
       num_layers: 4
 
@@ -235,9 +236,9 @@ trainer:
     rand_frames_to_correct_for_train: True  # random #init-cond-frame ~ 2
     add_all_frames_to_correct_as_cond: True  # when a frame receives a correction click, it becomes a conditioning frame (even if it's not initially a conditioning frame)
     # maximum 2 initial conditioning frames
-    num_init_cond_frames_for_train: 2
+    num_init_cond_frames_for_train: 1
     rand_init_cond_frames_for_train: True  # random 1~2
-    num_correction_pt_per_frame: 7
+    num_correction_pt_per_frame: 1
     use_act_ckpt_iterative_pt_sampling: false
     
 
@@ -342,17 +343,17 @@ trainer:
         - scheduler:
             _target_: fvcore.common.param_scheduler.CosineParamScheduler
             start_value: ${scratch.base_lr}
-            end_value: ${scratch.base_lr}
+            end_value: ${divide:${scratch.base_lr},10}
         - scheduler:
             _target_: fvcore.common.param_scheduler.CosineParamScheduler
             start_value: ${scratch.vision_lr}
-            end_value: ${scratch.vision_lr}
+            end_value: ${divide:${scratch.vision_lr},10}
           param_names:
             - 'image_encoder.*'
       weight_decay:
         - scheduler:
             _target_: fvcore.common.param_scheduler.ConstantParamScheduler
-            value: 0.0
+            value: 0.1
         - scheduler:
             _target_: fvcore.common.param_scheduler.ConstantParamScheduler
             value: 0.0
@@ -364,10 +365,10 @@ trainer:
     all:
       _target_: training.loss_fns.MultiStepMultiSoftMaxMasksAndIous
       weight_dict:
-        loss_mask: 1
+        loss_mask: 20
         loss_dice: 1
         loss_iou: 0
-        loss_class: 0
+        loss_class: 1
       supervise_all_iou: true
       iou_use_l1_loss: true
       pred_obj_scores: true
@@ -402,11 +403,10 @@ trainer:
         _target_: training.utils.checkpoint_utils.load_checkpoint_and_apply_kernels
         checkpoint_path: /scratch_net/ken/radjoe/Projects/SourceCode/MedSAM2/checkpoints/MedSAM2_latest.pt # PATH to SAM 2.1 checkpoint
         ckpt_state_dict_keys: ['model']
-
 launcher:
   num_nodes: 1
   gpus_per_node: 4
-  experiment_log_dir: /scratch_net/ken/radjoe/Projects/Experiments/SAMEXP/logs/decoder_only_smaller_sig # Path to log directory, defaults to ./sam2_logs/${config_name}
+  experiment_log_dir: /scratch_net/ken/radjoe/Projects/Experiments/SAMEXP/logs/decoder_only_augs # Path to log directory, defaults to ./sam2_logs/${config_name}
 
 # SLURM args if running on a cluster
 submitit:

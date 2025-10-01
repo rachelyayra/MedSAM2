@@ -2,7 +2,7 @@
 
 scratch:
   resolution: 512
-  train_video_batch_size: 8
+  train_video_batch_size: 16
   num_train_workers: 0
   num_frames: 8
   max_num_objects: 5
@@ -21,6 +21,7 @@ dataset:
   val_gt_folder: /scratch_net/ken/radjoe/BraTS/Validation/labels_UNN  # PATH to MOSE Annotations folder
   file_list_txt: null
   multiplier: 1
+
 
 # Video transforms
 vos:
@@ -57,6 +58,7 @@ vos:
         - _target_: training.dataset.transforms.NormalizeAPI
           mean: [0.485, 0.456, 0.406]
           std: [0.229, 0.224, 0.225]
+
 
   val_transforms:
     - _target_: training.dataset.transforms.ComposeAPI
@@ -100,7 +102,7 @@ trainer:
   seed_value: 123
 
   model:
-    _target_: training.model.sam2.SAM2Train
+    _target_: training.model.sam2softmax.SAM2Train
     image_encoder:
       _target_: sam2.modeling.backbones.image_encoder.ImageEncoder
       scalp: 1
@@ -125,7 +127,8 @@ trainer:
         fpn_interp_model: nearest
 
     freeze_image_encoder: true
-    # freeze_adapter : true
+    # freeze_all: true
+    
     memory_attention:
       _target_: sam2.modeling.memory_attention.MemoryAttention
       d_model: 256
@@ -221,7 +224,7 @@ trainer:
 
     ####### Training specific params #######
     # box/point input and corrections
-    prob_to_use_pt_input_for_train: 0.5
+    prob_to_use_pt_input_for_train: 1.0
     prob_to_use_pt_input_for_eval: 1.0
     prob_to_use_box_input_for_train: 1.0 
     prob_to_use_box_input_for_eval: 1.0
@@ -259,7 +262,7 @@ trainer:
               transforms: ${vos.train_transforms}
               training: true
               video_dataset:
-                _target_: training.dataset.vos_raw_dataset.BraTSRawDataset
+                _target_: training.dataset.vos_raw_dataset.BraTSSigDataset
                 img_folder: ${dataset.img_folder}
                 gt_folder: ${dataset.gt_folder}
                 file_list_txt: ${dataset.file_list_txt}
@@ -292,7 +295,7 @@ trainer:
               transforms: ${vos.val_transforms}
               training: true
               video_dataset:
-                _target_: training.dataset.vos_raw_dataset.BraTSRawDataset
+                _target_: training.dataset.vos_raw_dataset.BraTSSigDataset
                 img_folder: ${dataset.val_folder}
                 gt_folder: ${dataset.val_gt_folder}
                 file_list_txt: ${dataset.file_list_txt}
@@ -358,7 +361,7 @@ trainer:
 
   loss:
     all:
-      _target_: training.loss_fns.MultiStepSingleMasksAndIous
+      _target_: training.loss_fns.MultiStepMultiSoftMaxMasksAndIous
       weight_dict:
         loss_mask: 20
         loss_dice: 1
@@ -396,9 +399,8 @@ trainer:
 
       state_dict:
         _target_: training.utils.checkpoint_utils.load_checkpoint_and_apply_kernels
-        checkpoint_path: checkpoints/MedSAM2_latest.pt # PATH to SAM 2.1 checkpoint
+        checkpoint_path: /scratch_net/ken/radjoe/Projects/SourceCode/MedSAM2/checkpoints/MedSAM2_latest.pt # PATH to SAM 2.1 checkpoint
         ckpt_state_dict_keys: ['model']
-
 launcher:
   num_nodes: 1
   gpus_per_node: 4

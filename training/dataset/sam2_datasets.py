@@ -122,6 +122,8 @@ class TorchTrainMixedDataset:
             assert len(dataset_prob) == len(datasets)
             dataset_prob = torch.tensor(dataset_prob)
 
+        print(f"Dataset mixing probabilities: {len(datasets)}")
+
         logging.info(f"Dataset mixing probabilities: {dataset_prob.tolist()}")
         assert dataset_prob.sum().item() == 1.0, "Probabilities should sum to 1.0"
         self.dataset_prob = dataset_prob

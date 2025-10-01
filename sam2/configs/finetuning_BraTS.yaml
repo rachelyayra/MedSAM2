@@ -2,7 +2,7 @@
 
 scratch:
   resolution: 512
-  train_video_batch_size: 8
+  train_video_batch_size: 32
   num_train_workers: 0
   num_frames: 8
   max_num_objects: 5

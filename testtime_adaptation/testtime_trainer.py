@@ -11,14 +11,14 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional
 
 import numpy as np
-
+import torchvision.transforms.functional as F
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 from hydra.utils import instantiate
 from iopath.common.file_io import g_pathmgr
 
-
+import copy
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
@@ -57,6 +57,8 @@ from training.utils.train_utils import (
 
 from torchvision.utils import save_image
 
+np.random.seed(42)
+
 def unwrap_ddp_if_wrapped(model):
     if isinstance(model, torch.nn.parallel.DistributedDataParallel):
         return model.module
@@ -72,16 +74,64 @@ class TestTimeTrainer(Trainer):
             max_epochs=max_epochs,
             **kwargs
         )
-        self.view_transform = A.Compose([
-        A.RandomBrightnessContrast(p=1.0),
-        A.Normalize(),
-        ToTensorV2(),
-    ])
 
+        self.brightness = A.Compose([
+            A.RandomBrightnessContrast(brightness_limit=(0.1, 0.1),
+                           contrast_limit=(0.1, 0.1), p=1.0),
+            ToTensorV2(),
+        ])
+
+        self.gaussian_blur = A.Compose([
+            A.GaussianBlur(
+                blur_limit=(3, 3), sigma_limit=(0.8, 0.8), p=1.0),
+            
+            ToTensorV2(),
+        ])
+
+        self.gaussian_noise = A.Compose([
+            A.GaussNoise(
+                var_limit=(1e-6, 1e-6), mean=0.0, p=1.0
+            ),
+            ToTensorV2(),
+        ])
+
+        self.randomgamma = A.Compose([
+            A.RandomGamma(
+            gamma_limit=(102, 102), p=1.0
+            ),
+            ToTensorV2(),
+        ])  
+
+        self.flip = A.Compose([
+            A.HorizontalFlip(p=1.0),
+            ToTensorV2(),
+        ])
+
+        self.norm = A.Compose([A.Normalize(mean=(0.485,0.456,0.406),
+                              std=(0.229,0.224,0.225)),
+                  ToTensorV2()])
+
+        self.transforms = [self.brightness , self.gaussian_blur, self.gaussian_noise, self.randomgamma]
+
+        self.geo_transforms = [self.flip]
+
+        self.ema_decay = 0.999   # try 0.996–0.9997
+        self.warmup_frac = 0.3   # for your consistency ramp, optional
+
+    @torch.no_grad()
+    def ema_update(self, teacher: torch.nn.Module,
+                student: torch.nn.Module,
+                decay: float):
+        # parameters
+        for tp, sp in zip(teacher.parameters(), student.parameters()):
+            tp.data.mul_(decay).add_(sp.data, alpha=1.0 - decay)
+        # BatchNorm buffers (running_mean/var, num_batches_tracked)
+        for tb, sb in zip(teacher.buffers(), student.buffers()):
+            tb.data.copy_(sb.data)
 
     def run(self):
         self.model = unwrap_ddp_if_wrapped(self.model)
-        self.original_state = self.model.state_dict()
+        self.original_state = copy.deepcopy(self.model.state_dict())
         self.train_tta()
 
     def run_train(self, batch):
@@ -106,6 +156,7 @@ class TestTimeTrainer(Trainer):
 
     def train_tta(self):
         train_loader = self.train_dataset.get_loader(epoch=0)
+        print(f'The length of the train loader: {len(train_loader)}')
         for data_iter, batch in enumerate(train_loader):
             # Training and Adaptation
             self.training = True
@@ -114,6 +165,7 @@ class TestTimeTrainer(Trainer):
             segment_loader = batch[2]
             batch = batch[0]
             self.model.load_state_dict(self.original_state, strict=True)
+            self.teacher = copy.deepcopy(self.model)
             self.optim = construct_optimizer(
                 self.model,
                 self.optim_conf.optimizer,
@@ -132,7 +184,9 @@ class TestTimeTrainer(Trainer):
 
             # save prediction 
             pred_npy = self.postprocess_save(prediction, label)
-            save_path = 'tests.npy'
+            save_path = f'{self.logging_conf.log_dir}/BraTS_GLI'
+            os.makedirs(save_path, exist_ok=True)
+            save_path = f'{save_path}/{videos.video_name[:-8]}.npy'
             np.save(save_path, pred_npy)
 
             
@@ -197,6 +251,7 @@ class TestTimeTrainer(Trainer):
                 # applied if the gradients are infinite
                 self.scaler.step(self.optim.optimizer)
                 self.scaler.update()
+                self.ema_update(self.teacher, self.model, self.ema_decay)
 
                 # measure elapsed time
                 batch_time_meter.update(time.time() - end)
@@ -249,12 +304,13 @@ class TestTimeTrainer(Trainer):
         # gradients
         self.optim.zero_grad(set_to_none=True)
         with torch.cuda.amp.autocast(
-            enabled=self.optim_conf.amp.enabled,
-            dtype=get_amp_type(self.optim_conf.amp.amp_dtype),
+            enabled=False,
+            # dtype=get_amp_type(self.optim_conf.amp.amp_dtype),
         ):
             loss_dict, batch_size, extra_losses = self._step(
                 batch,
                 self.model,
+                self.teacher,
                 phase,
             )
 
@@ -285,25 +341,43 @@ class TestTimeTrainer(Trainer):
         self,
         batch: BatchedVideoDatapoint,
         model: nn.Module,
+        teacher: nn.Module,
         phase: str,
-    ):
-
-        results = self.generate_batch_views(batch=batch)
-
+    ):  
+        teacher.eval()
+        
+        print(f'Checking for generator')
+        results = self.generate_batch_views(batch=batch, transforms =self.transforms)
+        batch = self.norm_views(batch)[0]
+        print(f'After Checking for generator')
+        targets = batch.masks
         outputs_batch = []
+        print(f'batch information: {batch}')
         outputs = model(batch)
         outputs_batch.append(outputs)
-            
-        for i in results:
-            outputs = model(i)
-            outputs_batch.append(outputs)
+        
+        consave = f'{self.logging_conf.log_dir}/con'
+        os.makedirs(consave, exist_ok=True)
+        # con_outs = results[3].img_batch
+        # for i in range(len(con_outs)):
+        #         save_image(con_outs[i], f'{consave}/{i}.png')
+
+        with torch.no_grad():
+            outputs_anchor = teacher(batch)
+            outputs_batch.append(outputs_anchor)
+       
+        for i in range(len(results)):
+            aug_outs = model(results[i])
+
+            self.log_validation_image(aug_outs, targets, self.logging_conf.log_dir, i )
+            outputs_batch.append(aug_outs)
 
         batch_size = len(batch.img_batch)
         
-        targets = batch.masks
+        self.log_validation_image(outputs, targets, self.logging_conf.log_dir, 'outs' )
 
-        print(f'batch size {batch.img_batch.shape, len(outputs), len(outputs[0])}')
-        self.log_validation_image(outputs, targets, self.logging_conf.log_dir )
+        print(f'batch size {batch.img_batch.shape, len(outputs), len(outputs[0])} and shape of targets: {targets.shape}')
+        
 
         # batch_size = len(batch.img_batch)
 
@@ -393,76 +467,113 @@ class TestTimeTrainer(Trainer):
 
 
 
-    def generate_batch_views(self, batch: BatchedVideoDatapoint, num_views=4):
+    def norm_views(self, batch: BatchedVideoDatapoint):
             # batch_tensor: [B, C, H, W]
-            results = []
-            for i in range(num_views):
-                new_batch = BatchedVideoDatapoint(
-                img_batch=batch.img_batch,
-                obj_to_frame_idx=batch.obj_to_frame_idx,
-                masks=batch.masks,
-                metadata= batch.metadata,
+        results = []
+
+        img_batch_clone = batch.img_batch.clone()
+
+            # Apply view transforms
+        B, T, C, H, W = img_batch_clone.shape
+        # consave = f'{self.logging_conf.log_dir}/before'
+        # conafter = f'{self.logging_conf.log_dir}/after'
+        # os.makedirs(consave, exist_ok=True)
+        # os.makedirs(conafter, exist_ok=True)
+        for j in range(B):
+                for i in range(T):
+                    frame = img_batch_clone[j, i]  # [C, H, W]
+                    # save_image(frame, f'{consave}/{i}.png')
+
+                    transformed = F.normalize(frame, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+                    # save_image(transformed, f'{conafter}/{i}.png')
+                    # transformed_tensor = transformed.permute(0, 1, 2).contiguous() 
+                    
+                    img_batch_clone[j, i] = transformed
+
+        new_batch = BatchedVideoDatapoint(
+                img_batch=img_batch_clone,
+                obj_to_frame_idx=copy.deepcopy(batch.obj_to_frame_idx),
+                masks=copy.deepcopy(batch.masks),
+                metadata=copy.deepcopy(batch.metadata),
                 dict_key=batch.dict_key,
-                batch_size = batch.batch_size
-                )
-                for i in range(len(batch.img_batch[0])):
+                batch_size=batch.batch_size
+            )
 
-                    for j in range(len(batch.img_batch[:, 0])):
+        results.append(new_batch)
 
-                        temp = torch.permute(batch.img_batch[j][i], (1, 2, 0))
-                        temp = temp.cpu().numpy()
-                        temp = self.view_transform(image = temp)['image']
+        return results
 
-                        new_batch.img_batch[j][i] = temp
-
-                results.append(new_batch)
-            
-            return results
     
-    def log_validation_image(self, output, target, savepath):
-        savepaths = f'{savepath}/{self.epoch}'
-        # target = target.squeeze(0)
+    def log_validation_image(self, output, target, savepath, con):
+        savepaths = f'{savepath}/{con}/{self.epoch}/'
+        os.makedirs(savepaths, exist_ok=True)
+        print(f'Check unique: {target.unique(), target.shape}')
+        targets_onehot = nn.functional.one_hot(target.long(), 4)
+        targets_onehot = targets_onehot.permute(0, 1, 4, 2, 3).float()
+        
+        # targets_onehot = targets_onehot[:, 1:, :, :]  # drop channel 0
+        print(f'Check shape: {targets_onehot.shape}')
+        
         os.makedirs(savepaths,exist_ok=True)
         for frame_idx in range(len(output)):
             print(f'This is the frame idx: {frame_idx}')
             if frame_idx == 0:
+                
                 step_list = output[frame_idx]['multistep_pred_multimasks_high_res']
+
                 print(f'List of steps: {len(step_list)}')
                 for step_idx in range(len(step_list)):
                     if step_idx == 0:
                         pred_save = step_list[step_idx]
                         print(f'prediction saving: {pred_save.shape, target.shape}')
-                        pred_save = pred_save.squeeze(0)
+                        # pred_save = pred_save.squeeze(0)
                         
                         for idx in range(len(pred_save)):
-                            save_image(pred_save[idx].float(), f'{savepaths}/pred_{idx}.png') 
-                            save_image(target[frame_idx, idx].float(), f'{savepaths}/gt_{idx}.png') 
+                            
+                            for clx in range(len(pred_save[idx])):
+                                color_target = colorize_mask(target[frame_idx,idx].cpu())
+                                save_image(color_target.float(), f'{savepaths}/gt_class{idx}.png')
+                                save_image(targets_onehot[frame_idx, idx,clx ].float(), f'{savepaths}/gt_class_{idx}_{clx}.png')
+                                save_image(pred_save[idx, clx].float(), f'{savepaths}/pred_class_{idx}_{clx}.png') 
+                                print(f'Check shape: {target[frame_idx, idx, clx ].shape}')
 
-    def generate_batch_views(self, batch: BatchedVideoDatapoint, num_views=4):
-            # batch_tensor: [B, C, H, W]
-            results = []
-            for i in range(num_views):
-                new_batch = BatchedVideoDatapoint(
-                img_batch=batch.img_batch,
-                obj_to_frame_idx=batch.obj_to_frame_idx,
-                masks=batch.masks,
-                metadata= batch.metadata,
+    def generate_batch_views(self, batch: BatchedVideoDatapoint, transforms):
+        results = []
+        for trans in range(len(transforms)):
+            print(f'transforms : {trans}')
+            # Clone the tensor to ensure independence
+            img_batch_clone = batch.img_batch.clone()
+
+            # Apply view transforms
+            B, T, C, H, W = img_batch_clone.shape
+            consave = f'{self.logging_conf.log_dir}/before/{trans}'
+            conafter = f'{self.logging_conf.log_dir}/after/{trans}'
+            os.makedirs(consave, exist_ok=True)
+            os.makedirs(conafter, exist_ok=True)
+            for j in range(B):
+                for i in range(T):
+                    frame = img_batch_clone[j, i]  # [C, H, W]
+                    save_image(frame, f'{consave}/{j}_{i}.png')
+                    frame_np = frame.permute(1, 2, 0).cpu().numpy()  # [H, W, C]
+
+                    transformed = transforms[trans](image=frame_np)['image']  # [H, W, C]
+                    save_image(transformed, f'{conafter}/{j}_{i}.png')
+                    transformed_tensor = transformed.permute(0, 1, 2).contiguous() 
+                    transformed_tensor = F.normalize(transformed_tensor, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+                    img_batch_clone[j, i] = transformed_tensor
+
+            new_batch = BatchedVideoDatapoint(
+                img_batch=img_batch_clone,
+                obj_to_frame_idx=copy.deepcopy(batch.obj_to_frame_idx),
+                masks=copy.deepcopy(batch.masks),
+                metadata=copy.deepcopy(batch.metadata),
                 dict_key=batch.dict_key,
-                batch_size = batch.batch_size
-                )
-                for i in range(len(batch.img_batch[0])):
+                batch_size=batch.batch_size
+            )
 
-                    for j in range(len(batch.img_batch[:, 0])):
+            results.append(new_batch)
 
-                        temp = torch.permute(batch.img_batch[j][i], (1, 2, 0))
-                        temp = temp.cpu().numpy()
-                        temp = self.view_transform(image = temp)['image']
-
-                        new_batch.img_batch[j][i] = temp
-
-                results.append(new_batch)
-            
-            return results
+        return results
         
     def postprocess_save(self,prediction,label_shape):
         total_mask = np.zeros(label_shape)
@@ -473,3 +584,20 @@ class TestTimeTrainer(Trainer):
                     print(total_mask.shape)
                     total_mask[:,:, :, out_frame_idx] = out_mask
         return total_mask
+    
+def colorize_mask(mask, palette=None):
+    """mask: [H,W] int tensor with class IDs"""
+    if palette is None:
+        # simple fixed palette for 4 classes
+        palette = torch.tensor([
+            [0,0,0],      # class 0 -> black
+            [255,0,0],    # class 1 -> red
+            [0,255,0],    # class 2 -> green
+            [0,0,255],    # class 3 -> blue
+        ], dtype=torch.uint8)
+
+    print(f'colorize mask shape; {mask.shape}')
+    mask = mask.squeeze(0)
+    h,w = mask.shape
+    mask_rgb = palette[mask.flatten()].view(h,w,3).permute(2,0,1)  # [3,H,W]
+    return mask_rgb

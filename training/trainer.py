@@ -14,6 +14,8 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional
 
+import torch.nn.functional as F
+
 import numpy as np
 
 import torch
@@ -159,7 +161,7 @@ class Trainer:
         mode: str = "train",
         accelerator: str = "cuda",
         seed_value: int = 123,
-        val_epoch_freq: int = 1,
+        val_epoch_freq: int = 20,
         distributed: Dict[str, bool] = None,
         cuda: Dict[str, bool] = None,
         env_variables: Optional[Dict[str, Any]] = None,
@@ -434,7 +436,9 @@ class Trainer:
 
         with g_pathmgr.open(ckpt_path, "rb") as f:
             checkpoint = torch.load(f, map_location="cpu")
-        load_state_dict_into_model(
+            print(f'The model dict: {checkpoint["model"]}')
+
+            load_state_dict_into_model(
             model=self.model,
             state_dict=checkpoint["model"],
             ignore_missing_keys=self.checkpoint_conf.skip_saving_parameters,
@@ -455,6 +459,9 @@ class Trainer:
             self.train_dataset.load_checkpoint_state(checkpoint["train_dataset"])
 
     def is_intermediate_val_epoch(self, epoch):
+        print(f'Checking if epoch {epoch} is intermediate validation epoch')
+        print(f'Checking if epoch {epoch} is intermediate validation epoch {epoch % self.val_epoch_freq == 0}')
+        print(f'Checking if epoch {epoch} is intermediate validation epoch {epoch < self.max_epochs - 1}')
         return epoch % self.val_epoch_freq == 0 and epoch < self.max_epochs - 1
 
     def _step(
@@ -467,13 +474,16 @@ class Trainer:
         outputs = model(batch)
         print(f'batch size {batch.img_batch.shape, len(outputs), len(outputs[0])}')
         
+        outs = collect_tensors(outputs)
+
 
         # batch size (torch.Size([8, 1, 3, 512, 512]), 8, 13)
         targets = batch.masks
         batch_size = len(batch.img_batch)
 
         print(f'batch size is checking here')
-        self.log_validation_image(outputs, targets, self.logging_conf.log_dir )
+        if self.is_intermediate_val_epoch(self.epoch):
+            self.log_validation_image(outputs, targets, self.logging_conf.log_dir )
         print(f'batch size is checking here')
 
         key = batch.dict_key  # key for dataset
@@ -512,10 +522,12 @@ class Trainer:
                         find_stages=outputs,
                         find_metadatas=batch.metadata,
                     )
-
+        trainable = [n for n,p in model.named_parameters() if p.requires_grad]
+        print("trainable count:", len(trainable))
         return ret_tuple
 
     def run(self):
+        print(f'This runs in code: {self.mode}')
         assert self.mode in ["train", "train_only", "val"]
         if self.mode == "train":
             if self.epoch > 0:
@@ -526,7 +538,6 @@ class Trainer:
                     self.epoch -= 1
                     self.run_val()
                     self.epoch += 1
-
             self.run_train()
             self.run_val()
         elif self.mode == "val":
@@ -537,19 +548,22 @@ class Trainer:
     def _setup_dataloaders(self):
         self.train_dataset = None
         self.val_dataset = None
-
+        print(f'In dataloader: {self.mode}')
         if self.mode in ["train", "val"]:
+            print(f'Instantiating validation dataset: {self.data_conf.get(Phase.VAL, None)}')
             self.val_dataset = instantiate(self.data_conf.get(Phase.VAL, None))
 
         if self.mode in ["train", "train_only"]:
             self.train_dataset = instantiate(self.data_conf.train)
 
     def run_train(self):
+        print(f'This runs in code in run_train')
 
         while self.epoch < self.max_epochs:
             dataloader = self.train_dataset.get_loader(epoch=int(self.epoch))
             barrier()
-            outs, assessments = self.train_epoch(dataloader)
+            print(f'This runs in code in run_train after getting dataloader')
+            outs = self.train_epoch(dataloader)
             self.logger.log_dict(outs, self.epoch)  # Logged only on rank 0
 
             # log train to text file.
@@ -559,11 +573,6 @@ class Trainer:
                     "a",
                 ) as f:
                     f.write(json.dumps(outs) + "\n")
-                with g_pathmgr.open(
-                    os.path.join(self.logging_conf.log_dir, "assessment_stats.json"),
-                    "a",
-                ) as f:
-                    f.write(json.dumps(assessments) + "\n")
 
             # Save checkpoint before validating
             self.save_checkpoint(self.epoch + 1)
@@ -585,29 +594,16 @@ class Trainer:
                     f.write(json.dumps(self.best_meter_values) + "\n")
 
             self.epoch += 1
-            
-            if self.stop_early:
-                # Log time to converge
-                
-                if self.distributed_rank == 0:
-                    self.best_meter_values.update(self._get_trainer_state("train"))
-                    with g_pathmgr.open(
-                        os.path.join(self.logging_conf.log_dir, "conv_stats.json"),
-                        "a",
-                    ) as f:
-                        f.write(json.dumps(self.time_elapsed_meter.val) + "\n")
-
-                break
-                
-
         # epoch was incremented in the loop but the val step runs out of the loop
         self.epoch -= 1
-        
 
     def run_val(self):
+        if not self.val_dataset:
+            print(f'No val dataset, returning')
+            return
+
         dataloader = self.val_dataset.get_loader(epoch=int(self.epoch))
         outs = self.val_epoch(dataloader, phase=Phase.VAL)
-        self.stop_early = self.early_stopping.early_stop(outs['Losses/val_all_loss'])
         del dataloader
         gc.collect()
         self.logger.log_dict(outs, self.epoch)  # Logged only on rank 0
@@ -712,7 +708,7 @@ class Trainer:
 
             if data_iter % 10 == 0:
                 dist.barrier()
-
+        print(f'This runs in code in val_epoch after val_loader')
         self.est_epoch_time[phase] = batch_time.avg * iters_per_epoch
         self._log_timers(phase)
         for model in curr_models:
@@ -740,7 +736,7 @@ class Trainer:
         }
 
     def train_epoch(self, train_loader):
-        
+
         # Init stat meters
         batch_time_meter = AverageMeter("Batch Time", self.device, ":.2f")
         data_time_meter = AverageMeter("Data Time", self.device, ":.2f")
@@ -775,22 +771,20 @@ class Trainer:
         # Model training loop
         self.model.train()
         end = time.time()
+        print(f'This runs in code in train_epoch: length of trainloader {len(train_loader)}')
 
         for data_iter, batch in enumerate(train_loader):
             # measure data loading time
-            data_time_meter.update(time.time() - end)
+            print(f'This runs in code in {batch}')
+            
             data_times.append(data_time_meter.val)
             batch = batch.to(
                 self.device, non_blocking=True
             )  # move tensors in a tensorclass
 
             try:
+                print(f'This runs in code in train_epoch after train_loader')
                 self._run_step(batch, phase, loss_mts, extra_loss_mts)
-
-                # Add this block to clear cache every N steps
-                if data_iter % 20 == 0:  # Adjust 20 to your desired frequency
-                    torch.cuda.empty_cache()
-                    gc.collect()
 
                 # compute gradient and do optim step
                 exact_epoch = self.epoch + float(data_iter) / iters_per_epoch
@@ -859,11 +853,8 @@ class Trainer:
             # Catching NaN/Inf errors in the loss
             except FloatingPointError as e:
                 raise e
-        # Log batch time
-        assessment_info = dict()
+
         self.est_epoch_time[Phase.TRAIN] = batch_time_meter.avg * iters_per_epoch
-        assessment_info[f'epoch_train_time{self.epoch}'] = self.est_epoch_time[Phase.TRAIN]
-        assessment_info[f'epoch_mem_{self.epoch}'] = mem_meter.peak
         self._log_timers(Phase.TRAIN)
         self._log_sync_data_times(Phase.TRAIN, data_times)
 
@@ -876,7 +867,7 @@ class Trainer:
         out_dict.update(self._get_trainer_state(phase))
         logging.info(f"Losses and meters: {out_dict}")
         self._reset_meters([phase])
-        return out_dict , assessment_info
+        return out_dict
 
     def _log_sync_data_times(self, phase, data_times):
         data_times = all_reduce_max(torch.tensor(data_times)).tolist()
@@ -927,10 +918,7 @@ class Trainer:
                 return
 
         self.scaler.scale(loss).backward()
-        for name, param in self.model.named_parameters():
-            if param.requires_grad and param.grad is None:
-                print(f"Expected grad missing for {name}")
-                loss_mts[loss_key].update(loss.item(), batch_size)
+        loss_mts[loss_key].update(loss.item(), batch_size)
         for extra_loss_key, extra_loss in extra_losses.items():
             if extra_loss_key not in extra_loss_mts:
                 extra_loss_mts[extra_loss_key] = AverageMeter(
@@ -1045,6 +1033,9 @@ class Trainer:
         self.logger = Logger(self.logging_conf)
 
         self.model = instantiate(self.model_conf, _convert_="all")
+        # add probe param ONCE after defining optimizer
+        # self.probe = torch.nn.Parameter(torch.tensor(0.0, device=next(self.model.parameters()).device))
+        
         
         print_model_summary(self.model)
 
@@ -1082,6 +1073,7 @@ class Trainer:
             self.optim_conf.options,
             self.optim_conf.param_group_modifiers,
         )
+        # self.optim.optimizer.add_param_group({"params":[self.probe]})
 
     def _log_loss_detailed_and_return_core_loss(self, loss, loss_str, step):
         core_loss = loss.pop(CORE_LOSS_KEY)
@@ -1093,22 +1085,37 @@ class Trainer:
 
     def log_validation_image(self, output, target, savepath):
         savepaths = f'{savepath}/{self.epoch}'
-        # target = target.squeeze(0)
+        os.makedirs(savepaths, exist_ok=True)
+        print(f'Check unique: {target.unique(), target.shape}')
+        targets_onehot = F.one_hot(target.squeeze(1).long(), 4)
+        targets_onehot = targets_onehot.permute(0, 1, 4, 2, 3).float()
+        
+        # targets_onehot = targets_onehot[:, 1:, :, :]  # drop channel 0
+        print(f'Check shape: {targets_onehot.shape}')
+        
         os.makedirs(savepaths,exist_ok=True)
         for frame_idx in range(len(output)):
             print(f'This is the frame idx: {frame_idx}')
             if frame_idx == 0:
+                
                 step_list = output[frame_idx]['multistep_pred_multimasks_high_res']
+
                 print(f'List of steps: {len(step_list)}')
                 for step_idx in range(len(step_list)):
                     if step_idx == 0:
                         pred_save = step_list[step_idx]
                         print(f'prediction saving: {pred_save.shape, target.shape}')
-                        pred_save = pred_save.squeeze(0)
+                        # pred_save = pred_save.squeeze(0)
                         
                         for idx in range(len(pred_save)):
-                            save_image(pred_save[idx].float(), f'{savepaths}/pred_{idx}.png') 
-                            save_image(target[frame_idx, idx].float(), f'{savepaths}/gt_{idx}.png') 
+                            
+                            for clx in range(len(pred_save[idx])):
+                                color_target = colorize_mask(target[frame_idx,idx].cpu())
+                                save_image(color_target.float(), f'{savepaths}/gt_class{idx}.png')
+                                save_image(targets_onehot[frame_idx, idx,clx ].float(), f'{savepaths}/gt_class_{idx}_{clx}.png')
+                                save_image(pred_save[idx, clx].float(), f'{savepaths}/pred_class_{idx}_{clx}.png') 
+                                print(f'Check shape: {target[frame_idx, idx, clx ].shape}')
+                                 
 
 
 def print_model_summary(model: torch.nn.Module, log_dir: str = ""):
@@ -1184,3 +1191,82 @@ def get_human_readable_count(number: int) -> str:
         return f"{int(number):,d} {labels[index]}"
     else:
         return f"{number:,.1f} {labels[index]}"
+
+def reshape_for_classes(tensor, num_classes=3):
+    """
+    Reshapes tensor from [frames, masks, H, W]
+    to [frames, batch, num_classes, H, W].
+
+    Args:
+        tensor: torch.Tensor of shape [frames, masks, H, W]
+        num_classes: int, number of classes (default=3)
+
+    Returns:
+        torch.Tensor reshaped to [frames, batch, num_classes, H, W]
+    """
+    frames, masks, H, W = tensor.shape
+    assert masks % num_classes == 0, (
+        f"Number of masks ({masks}) is not divisible by num_classes ({num_classes})"
+    )
+    batch = masks 
+    return tensor.view(frames, batch, num_classes, H, W)
+
+from collections.abc import Mapping, Sequence
+
+def collect_tensors(obj):
+    """
+    Recursively collect all torch.Tensors from nested dict/list/tuple structures.
+    """
+    found = []
+    stack = [obj]
+    while stack:
+        x = stack.pop()
+        if torch.is_tensor(x):
+            found.append(x)
+        elif isinstance(x, Mapping):
+            stack.extend(x.values())
+        elif isinstance(x, Sequence) and not isinstance(x, (str, bytes)):
+            stack.extend(x)
+    return found
+
+from torch.nn.modules.utils import consume_prefix_in_state_dict_if_present
+def missing_keys(model, ckpt_path_or_state_dict):
+    # load checkpoint dict
+    if isinstance(ckpt_path_or_state_dict, dict):
+        ckpt = ckpt_path_or_state_dict
+    else:
+        ckpt = torch.load(ckpt_path_or_state_dict, map_location="cpu")
+
+    # unwrap nested dicts
+    for k in ("state_dict", "model", "module"):
+        if isinstance(ckpt, dict) and k in ckpt and isinstance(ckpt[k], dict):
+            ckpt = ckpt[k]
+
+    # strip common prefixes
+    ckpt = ckpt.copy()
+    for pfx in ("module.", "model.", "net."):
+        consume_prefix_in_state_dict_if_present(ckpt, pfx)
+
+    # compare
+    model_keys = set(model.state_dict().keys())
+    ckpt_keys  = set(ckpt.keys())
+    missing = sorted(model_keys - ckpt_keys)
+
+    return missing
+
+def colorize_mask(mask, palette=None):
+    """mask: [H,W] int tensor with class IDs"""
+    if palette is None:
+        # simple fixed palette for 4 classes
+        palette = torch.tensor([
+            [0,0,0],      # class 0 -> black
+            [255,0,0],    # class 1 -> red
+            [0,255,0],    # class 2 -> green
+            [0,0,255],    # class 3 -> blue
+        ], dtype=torch.uint8)
+
+    print(f'colorize mask shape; {mask.shape}')
+    mask = mask.squeeze(0)
+    h,w = mask.shape
+    mask_rgb = palette[mask.flatten()].view(h,w,3).permute(2,0,1)  # [3,H,W]
+    return mask_rgb

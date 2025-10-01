@@ -14,7 +14,7 @@ from sam2.modeling.sam2_utils import (
 
 from sam2.utils.misc import concat_points
 
-from training.model.sam2 import SAM2Train
+from training.model.sam2softmax import SAM2Train
 
 import warnings
 from collections import OrderedDict
@@ -98,7 +98,7 @@ class SAM2TestTime(SAM2Train):
         
         mask = segment.load_mask()
         box, best_slice = self.mask_bbox(mask)
-        mask_shape = mask[1:].shape
+        mask_shape = mask.shape
         # vid_name = videos.video_name
         return box, best_slice, mask_shape
     
@@ -565,7 +565,7 @@ class SAM2TestTime(SAM2Train):
             "maskmem_features": None,
             "maskmem_pos_enc": None,
             consolidated_mask_key: torch.full(
-                size=(batch_size, 3, consolidated_H, consolidated_W),
+                size=(batch_size, 4, consolidated_H, consolidated_W),
                 fill_value=NO_OBJ_SCORE,
                 dtype=torch.float32,
                 device=inference_state["storage_device"],
@@ -646,7 +646,7 @@ class SAM2TestTime(SAM2Train):
                 mode="bilinear",
                 align_corners=False,
             )
-            high_res_masks = high_res_masks.sum(dim=1)
+            # high_res_masks = high_res_masks.sum(dim=1)
             if self.non_overlap_masks_for_mem_enc:
                 high_res_masks = self._apply_non_overlapping_constraints(high_res_masks)
             
@@ -1066,6 +1066,7 @@ class SAM2TestTime(SAM2Train):
             maskmem_features = maskmem_features.to(torch.bfloat16)
             maskmem_features = maskmem_features.to(storage_device, non_blocking=True)
         pred_masks_gpu = current_out["pred_masks"]
+        print(f'Pred masks gpu shape: {pred_masks_gpu.shape}')
         # potentially fill holes in the predicted masks
         if self.fill_hole_area > 0:
             pred_masks_gpu = fill_holes_in_mask_scores(

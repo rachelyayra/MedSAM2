@@ -4,18 +4,18 @@ scratch:
   resolution: 512
   train_video_batch_size: 1
   num_train_workers: 0
-  num_frames: 8
+  num_frames: 4
   max_num_objects: 5
   base_lr: 5.0e-5
   vision_lr: 3.0e-5
   phases_per_epoch: 1
-  num_epochs: 10
+  num_epochs: 15
 
 # Video transforms
 
 dataset:
   # PATHS to Dataset
-  img_folder: /scratch_net/ken/radjoe/BraTS/Tests/images_UNN  # PATH to MOSE JPEGImages folder
+  img_folder: /scratch_net/ken/radjoe/BraTS/Tests/images_UNN # PATH to MOSE JPEGImages folder
   gt_folder: /scratch_net/ken/radjoe/BraTS/Tests/labels_UNN   # PATH to MOSE Annotations folder
   val_folder: /scratch_net/ken/radjoe/BraTS/Tests/images_UNN  # PATH to MOSE JPEGImages folder
   val_gt_folder: /scratch_net/ken/radjoe/BraTS/Tests/labels_UNN  # PATH to MOSE Annotations folder
@@ -99,7 +99,7 @@ trainer:
   seed_value: 123
 
   model:
-    _target_: testtime_adaptation.model.sam2_tta.SAM2TestTime
+    _target_: testtime_adaptation.model.sam2_tta_softmax.SAM2TestTime
     image_encoder:
       _target_: sam2.modeling.backbones.image_encoder.ImageEncoder
       scalp: 1
@@ -124,7 +124,7 @@ trainer:
         fpn_interp_model: nearest
 
     freeze_image_encoder: true
-    freeze_all: true
+    # freeze_all: true
     
     memory_attention:
       _target_: sam2.modeling.memory_attention.MemoryAttention
@@ -259,7 +259,7 @@ trainer:
               transforms: ${vos.train_transforms}
               training: true
               video_dataset:
-                _target_: training.dataset.vos_raw_dataset.BraTSRawDataset
+                _target_: training.dataset.vos_raw_dataset.BraTSSigDataset
                 img_folder: ${dataset.img_folder}
                 gt_folder: ${dataset.gt_folder}
                 file_list_txt: ${dataset.file_list_txt}
@@ -292,7 +292,7 @@ trainer:
               transforms: ${vos.val_transforms}
               training: true
               video_dataset:
-                _target_: training.dataset.vos_raw_dataset.BraTSRawDataset
+                _target_: training.dataset.vos_raw_dataset.BraTSSigDataset
                 img_folder: ${dataset.val_folder}
                 gt_folder: ${dataset.val_gt_folder}
                 file_list_txt: ${dataset.file_list_txt}
@@ -358,12 +358,12 @@ trainer:
 
   loss:
     all:
-      _target_: training.loss_fns.MultiStepSingleTTAMasksAndIous
+      _target_: training.loss_fns.MultiStepSingleTTAConMasksAndIous
       weight_dict:
         loss_mask: 1
         loss_dice: 1
         loss_iou: 0
-        loss_class: 1
+        loss_class: 0
       supervise_all_iou: true
       iou_use_l1_loss: true
       pred_obj_scores: true
@@ -396,13 +396,13 @@ trainer:
 
       state_dict:
         _target_: training.utils.checkpoint_utils.load_checkpoint_and_apply_kernels
-        checkpoint_path: checkpoints/checkpoint_40.pt # PATH to SAM 2.1 checkpoint
+        checkpoint_path: /scratch_net/ken/radjoe/Projects/Experiments/SAMEXP/logs/decoder_only_augs/checkpoints/checkpoint.pt # PATH to SAM 2.1 checkpoint
         ckpt_state_dict_keys: ['model']
 
 launcher:
   num_nodes: 1
   gpus_per_node: 4
-  experiment_log_dir: /scratch_net/ken/radjoe/Projects/Experiments/SAMEXP/logs/decoder_only_adapter_tta # Path to log directory, defaults to ./sam2_logs/${config_name}
+  experiment_log_dir: /scratch_net/ken/radjoe/Projects/Experiments/SAMEXP/logs/decoder_only_adapter_example_tta_africa # Path to log directory, defaults to ./sam2_logs/${config_name}
 
 # SLURM args if running on a cluster
 submitit:
