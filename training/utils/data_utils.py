@@ -49,7 +49,6 @@ class BatchedVideoDatapoint:
     obj_to_frame_idx: torch.IntTensor
     masks: torch.BoolTensor
     metadata: BatchedVideoMetaData
-
     dict_key: str
 
     def pin_memory(self, device=None):
@@ -206,53 +205,23 @@ def collate_fn_3gt(
         [] for _ in range(T)
     ]  # List to store frame indices for each time step
 
-    standard_idx = [i for i in range(1,4)]
     for video_idx, video in enumerate(batch):
-        # print(f'The video index (frames), {video_idx}')
         orig_video_id = video.video_id
         orig_frame_size = video.size
-        
         for t, frame in enumerate(video.frames):
-            temp_obj_id = []
-            temp_seg = []
             objects = frame.objects
             for obj in objects:
-                # print(f'Objects: {obj}')
                 orig_obj_id = obj.object_id
-                temp_obj_id.append(orig_obj_id)
-
                 orig_frame_idx = obj.frame_index
                 step_t_obj_to_frame_idx[t].append(
                     torch.tensor([t, video_idx], dtype=torch.int)
                 )
-                
+                step_t_masks[t].append(obj.segment.to(torch.bool))
                 step_t_objects_identifier[t].append(
                     torch.tensor([orig_video_id, orig_obj_id, orig_frame_idx])
                 )
                 step_t_frame_orig_size[t].append(torch.tensor(orig_frame_size))
-                temp_seg.append(obj.segment.to(torch.bool))
-            # Rearrange in a started order
-            sorted_indices = sorted(range(len(temp_obj_id)), key=lambda i: temp_obj_id[i])
 
-            # Rearrange values and masks using the sorted indices
-            sorted_values = [temp_obj_id[i] for i in sorted_indices]
-            sorted_masks = [temp_seg[i] for i in sorted_indices]
-
-            standard_idx = set(standard_idx)
-
-            temp_id = set(sorted_values)
-
-            not_common = list(standard_idx.symmetric_difference(temp_id))
-
-            temp_mask =  torch.zeros([512, 512])
-            for i in not_common:
-                sorted_masks.insert(i, temp_mask)
-            for i in sorted_masks:
-                step_t_masks[t].append(i)
-
-
-    # print(f'This is the size of moasks { len(step_t_masks[t])}')
-            # print(f'the object id per frame{step_t_obj_to_frame_idx}')
     obj_to_frame_idx = torch.stack(
         [
             torch.stack(obj_to_frame_idx, dim=0)
@@ -260,7 +229,6 @@ def collate_fn_3gt(
         ],
         dim=0,
     )
-    # Keep the masks dimensions consistent.
     masks = torch.stack([torch.stack(masks, dim=0) for masks in step_t_masks], dim=0)
     objects_identifier = torch.stack(
         [torch.stack(id, dim=0) for id in step_t_objects_identifier], dim=0
@@ -357,3 +325,102 @@ def collate_fn_tta(
         batch_size=[T],
     ),  total_set[1], total_set[2]
 
+
+def collate_fn_ssl(
+    batch: List[VideoDatapoint],
+    dict_key,
+) -> BatchedVideoDatapoint:
+    """
+    Args:
+        batch: A list of VideoDatapoint instances.
+        dict_key (str): A string key used to identify the batch.
+    """
+    print(f'Batch in collate fn: {batch}')
+    primary = [prim for (prim, _) in batch]  
+
+    print(f'Batch in collate fn: { len(primary[0][0].frames)}')
+    support = [supp for (_, supp) in batch] 
+
+    print(f'Batch in collate fn: {len(support[0][0].frames)}')
+
+    unsup_batch, pred_vid, pred_seg = create_batch(primary, dict_key)
+    sup_batch, _, _ = create_batch(support, dict_key)
+
+    print(f"Batch in collate fn:{unsup_batch}, {sup_batch}")
+
+    return unsup_batch,  pred_vid, pred_seg, sup_batch
+
+
+
+def create_batch(batch, dict_key):
+    img_batch = []
+    pred_vid = [vid for (_,vid,_)  in batch]
+    pred_seg = [vid for (_,_, vid)  in batch]
+    for total_set in batch:
+        video = total_set[0]
+        img_batch += [torch.stack([frame.data for frame in video.frames], dim=0)]
+
+    
+    img_batch = torch.stack(img_batch, dim=0).permute((1, 0, 2, 3, 4))
+    T = img_batch.shape[0]
+    # Prepare data structures for sequential processing. Per-frame processing but batched across videos.
+    step_t_objects_identifier = [[] for _ in range(T)]
+    step_t_frame_orig_size = [[] for _ in range(T)]
+
+    step_t_masks = [[] for _ in range(T)]
+    step_t_obj_to_frame_idx = [
+        [] for _ in range(T)
+    ]  # List to store frame indices for each time step
+
+    standard_idx = [i for i in range(1,4)]
+    for video_idx, total_set in enumerate(batch):
+        # print(f'length of tuple {total_set[0]}')
+        video = total_set[0]
+        orig_video_id = video.video_id
+        orig_frame_size = video.size
+        
+        for t, frame in enumerate(video.frames):
+            objects = frame.objects
+            for obj in objects:
+                orig_obj_id = obj.object_id
+                orig_frame_idx = obj.frame_index
+                step_t_obj_to_frame_idx[t].append(
+                    torch.tensor([t, video_idx], dtype=torch.int)
+                )
+                step_t_masks[t].append(obj.segment.to(torch.long))
+                step_t_objects_identifier[t].append(
+                    torch.tensor([orig_video_id, orig_obj_id, orig_frame_idx])
+                )
+                step_t_frame_orig_size[t].append(torch.tensor(orig_frame_size))
+
+
+    # print(f'This is the size of moasks { len(step_t_masks[t])}')
+            # print(f'the object id per frame{step_t_obj_to_frame_idx}')
+    obj_to_frame_idx = torch.stack(
+        [
+            torch.stack(obj_to_frame_idx, dim=0)
+            for obj_to_frame_idx in step_t_obj_to_frame_idx
+        ],
+        dim=0,
+    )
+    # Keep the masks dimensions consistent.
+    masks = torch.stack([torch.stack(masks, dim=0) for masks in step_t_masks], dim=0)
+    print(f'Print the mask shape in the collate fn: {masks.shape}')
+    objects_identifier = torch.stack(
+        [torch.stack(id, dim=0) for id in step_t_objects_identifier], dim=0
+    )
+    frame_orig_size = torch.stack(
+        [torch.stack(id, dim=0) for id in step_t_frame_orig_size], dim=0
+    )
+
+    return BatchedVideoDatapoint(
+        img_batch=img_batch,
+        obj_to_frame_idx=obj_to_frame_idx,
+        masks=masks,
+        metadata=BatchedVideoMetaData(
+            unique_objects_identifier=objects_identifier,
+            frame_orig_size=frame_orig_size,
+        ),
+        dict_key=dict_key,
+        batch_size=[T], 
+    ), pred_vid, pred_seg

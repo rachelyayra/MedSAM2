@@ -135,7 +135,7 @@ class MaskDecoder(nn.Module):
           torch.Tensor: batched predictions of mask quality
           torch.Tensor: batched SAM token for mask output
         """
-        masks, iou_pred, mask_tokens_out, object_score_logits, upscaled_embedding = self.predict_masks(
+        masks, iou_pred, mask_tokens_out, object_score_logits, upscaled_embedding, save_q, save_k = self.predict_masks(
             image_embeddings=image_embeddings,
             image_pe=image_pe,
             sparse_prompt_embeddings=sparse_prompt_embeddings,
@@ -167,7 +167,7 @@ class MaskDecoder(nn.Module):
 
         # Prepare output
         print(f'Print the the multimask: {masks.shape}')
-        return masks, iou_pred, sam_tokens_out, object_score_logits, upscaled_embedding
+        return masks, iou_pred, sam_tokens_out, object_score_logits, upscaled_embedding, save_q, save_k
 
     def predict_masks(
         self,
@@ -214,7 +214,7 @@ class MaskDecoder(nn.Module):
         b, c, h, w = src.shape
 
         # Run the transformer
-        hs, src = self.transformer(src, pos_src, tokens)
+        hs, src, save_q, save_k = self.transformer(src, pos_src, tokens)
         iou_token_out = hs[:, s, :]
         mask_tokens_out = hs[:, s + 1 : (s + 1 + self.num_mask_tokens), :]
 
@@ -248,24 +248,8 @@ class MaskDecoder(nn.Module):
             # Obj scores logits - default to 10.0, i.e. assuming the object is present, sigmoid(10)=1
             object_score_logits = 10.0 * iou_pred.new_ones(iou_pred.shape[0], 1)
 
-        print("DBG requires_grad / grad_fn:")
-        print("  tokens used in transformer? no direct var here")
-        # re-run pieces to print flags:
-        # (a) after transformer:
-        # hs, src = self.transformer(...)
-        print("  hs        :", hs.requires_grad, type(hs.grad_fn).__name__ if hs.grad_fn else None)
-        print("  src(feat) :", src.requires_grad, type(src.grad_fn).__name__ if src.grad_fn else None)
 
-        # (b) key tensors in the mask path:
-        print("  mask_tokens_out :", mask_tokens_out.requires_grad, type(mask_tokens_out.grad_fn).__name__ if mask_tokens_out.grad_fn else None)
-        print("  upscaled_embed  :", upscaled_embedding.requires_grad, type(upscaled_embedding.grad_fn).__name__ if upscaled_embedding.grad_fn else None)
-
-        # hyper_in = stack of MLP(mask_tokens_out)
-        print("  hyper_in        :", hyper_in.requires_grad, type(hyper_in.grad_fn).__name__ if hyper_in.grad_fn else None)
-        print("  masks           :", masks.requires_grad, type(masks.grad_fn).__name__ if masks.grad_fn else None)
-
-
-        return masks, iou_pred, mask_tokens_out, object_score_logits, upscaled_embedding
+        return masks, iou_pred, mask_tokens_out, object_score_logits, upscaled_embedding, save_q, save_k
 
     def _get_stability_scores(self, mask_logits):
         """

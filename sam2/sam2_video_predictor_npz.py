@@ -13,7 +13,7 @@ from tqdm import tqdm
 
 from sam2.modeling.sam2_base import NO_OBJ_SCORE, SAM2Base
 from sam2.utils.misc import concat_points, fill_holes_in_mask_scores, load_video_frames
-
+import numpy as np
 
 class SAM2VideoPredictorNPZ(SAM2Base):
     """The predictor class to handle user interactions and manage inference states."""
@@ -40,6 +40,7 @@ class SAM2VideoPredictorNPZ(SAM2Base):
         self.clear_non_cond_mem_for_multi_obj = clear_non_cond_mem_for_multi_obj
         self.add_all_frames_to_correct_as_cond = add_all_frames_to_correct_as_cond
         self.pred_option = True
+        self.name = ''
 
     @torch.inference_mode()
     def init_state(
@@ -307,7 +308,6 @@ class SAM2VideoPredictorNPZ(SAM2Base):
 
         # Resize the output mask to the original video resolution
         obj_ids = inference_state["obj_ids"]
-        print(f'Object idx: {obj_ids}')
         consolidated_out = self._consolidate_temp_output_across_obj(
             inference_state,
             frame_idx,
@@ -468,7 +468,7 @@ class SAM2VideoPredictorNPZ(SAM2Base):
             "maskmem_features": None,
             "maskmem_pos_enc": None,
             consolidated_mask_key: torch.full(
-                size=(batch_size, 3, consolidated_H, consolidated_W),
+                size=(batch_size, 1, consolidated_H, consolidated_W),
                 fill_value=NO_OBJ_SCORE,
                 dtype=torch.float32,
                 device=inference_state["storage_device"],
@@ -519,7 +519,6 @@ class SAM2VideoPredictorNPZ(SAM2Base):
             # Add the temporary object output mask to consolidated output mask
             obj_mask = out["pred_masks"]
             consolidated_pred_masks = consolidated_out[consolidated_mask_key]
-            print(f'Consolidated prediction masks: {consolidated_pred_masks.shape}')
             if obj_mask.shape[-2:] == consolidated_pred_masks.shape[-2:]:
                 consolidated_pred_masks[obj_idx : obj_idx + 1] = obj_mask
             else:
@@ -530,10 +529,7 @@ class SAM2VideoPredictorNPZ(SAM2Base):
                     mode="bilinear",
                     align_corners=False,
                 )
-                print(f'Consolidated obj masks: {resized_obj_mask.shape}')
-                print(f'Consolidated obj idx: {obj_idx}')
                 consolidated_pred_masks[obj_idx : obj_idx + 1] = resized_obj_mask
-
             consolidated_out["obj_ptr"][obj_idx : obj_idx + 1] = out["obj_ptr"]
             consolidated_out["object_score_logits"][obj_idx : obj_idx + 1] = out[
                 "object_score_logits"
@@ -549,10 +545,8 @@ class SAM2VideoPredictorNPZ(SAM2Base):
                 mode="bilinear",
                 align_corners=False,
             )
-            high_res_masks = high_res_masks.sum(dim=1)
             if self.non_overlap_masks_for_mem_enc:
                 high_res_masks = self._apply_non_overlapping_constraints(high_res_masks)
-            
             maskmem_features, maskmem_pos_enc = self._run_memory_encoder(
                 inference_state=inference_state,
                 frame_idx=frame_idx,
@@ -749,7 +743,7 @@ class SAM2VideoPredictorNPZ(SAM2Base):
                 inference_state, frame_idx, current_out, storage_key
             )
             inference_state["frames_already_tracked"][frame_idx] = {"reverse": reverse}
-            print(f'Print the pred_masks: {pred_masks.shape}')
+
             # Resize the output mask to the original video resolution (we directly use
             # the mask scores on GPU for output to avoid any CPU conversion in between)
             _, video_res_masks = self._get_orig_video_res_output(
@@ -988,6 +982,7 @@ class SAM2VideoPredictorNPZ(SAM2Base):
             "obj_ptr": obj_ptr,
             "object_score_logits": object_score_logits,
         }
+        print(f'Shape of the prediction mask: {pred_masks_gpu.shape}')
         return compact_current_out, pred_masks_gpu
 
     def _run_memory_encoder(
@@ -1183,4 +1178,3 @@ class SAM2VideoPredictorNPZ(SAM2Base):
             non_cond_frame_outputs.pop(t, None)
             for obj_output_dict in inference_state["output_dict_per_obj"].values():
                 obj_output_dict["non_cond_frame_outputs"].pop(t, None)
-

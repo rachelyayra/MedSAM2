@@ -661,17 +661,16 @@ class TargetedEDETContrastReduce:
 
     def __init__(
         self,
-        consistent_transform: bool,
         p: float = 0.2,
-        ed_modalities=(0,2),      # FLAIR, T2 (adjust to your ordering)
-        et_modalities=(1,),        # T1ce
+        ed_modalities=(0,2),      
+        et_modalities=(1,),       
         ed_scale=(0.7, 1.0),
         et_scale=(0.7, 1.0),
         ed_gamma=(1.1, 1.4),
         et_gamma=(1.1, 1.4),
         eps: float = 1e-6,
     ):
-        self.consistent_transform = consistent_transform
+
         self.p = float(p)
         self.ed_modalities = tuple(ed_modalities)
         self.et_modalities = tuple(et_modalities)
@@ -683,10 +682,8 @@ class TargetedEDETContrastReduce:
         self.ed_scale = 1.0
         self.et_scale = 1.0
 
-    # @torch.no_grad()
     def _sample_params(self):
         """Sample random (scale, gamma) for ED and ET."""
-        # print(f'Sampling params for TargetedEDETContrastReduce...: {self.ed_scale}, {self.et_scale}, {self.ed_gamma}, {self.et_gamma}')
         ed_scale = random.uniform(*self.ed_scale_tuple)
         et_scale = random.uniform(*self.et_scale_tuple)
         ed_gamma = random.uniform(*self.ed_gamma)
@@ -705,7 +702,6 @@ class TargetedEDETContrastReduce:
 
     # @torch.no_grad()
     def feather(self,mask, radius=50):
-        # print('Feathering mask...type:', mask.dtype, mask.shape)
         dist_in = distance_transform_edt(mask)
         dist_out = distance_transform_edt(~mask)
         alpha = dist_out / (dist_in + dist_out + 1e-6)
@@ -753,9 +749,6 @@ class TargetedEDETContrastReduce:
 
         ed_mask = ed_mask.bool()
         et_mask = et_mask.bool()
-        # (optional) squeeze masks like [1,H,W] -> [H,W]
-        # if ed_mask.ndim == 3 and ed_mask.size(0) == 1: ed_mask = ed_mask.squeeze(0)
-        # if et_mask.ndim == 3 and et_mask.size(0) == 1: et_mask = et_mask.squeeze(0)
 
         # means inside regions
         if ed_mask.any() and et_mask.any():
@@ -804,10 +797,7 @@ class TargetedEDETContrastReduce:
 
             # Apply ED reduction
             ed_scale, et_scale = self.compute_balancing_scales(x, ed_mask, et_mask)
-            # ed_gamma = 1.5
-            # # et_gamma = 1.5
-            # print(f'Before applying a: {x[[0,2]].mean()}, {x[1].mean()}')
-            # print(f'ED Mask: {ed_mask.any(),}, ET Mask: {et_mask.any()}, ed_mask shape: {ed_mask.unique()}, et_mask shape: {et_mask.unique()}, ed_scale: {ed_scale}, et_scale: {et_scale}')
+
             if ed_mask.any():
                 for m in self.ed_modalities:
                     # print(f'Applying ED on modality {m}')
@@ -818,15 +808,11 @@ class TargetedEDETContrastReduce:
             # Apply ET reduction
             if et_mask.any():
                 for m in self.et_modalities:
-                    # print(f'Applying ET on modality {m}')
                     if 0 <= m < x.size(0):
                         feathered_et_mask = self.feather(et_mask).to(x.device)
                         x[m] = self._apply_on_channel(x[m], feathered_et_mask, et_scale, et_gamma).to(x.dtype)
-            # print(f'Saving....')
-            # save_image(x.float()/255.0, f"after_{idx}.png")
-            # print(f'Saved!')
-            # back to PIL
-            # print(f'After applying a: {x[[0,2]].mean()}, {x[1].mean()}')
+
+
             x = F.to_pil_image(x)
             datapoint.frames[idx].data = x
 

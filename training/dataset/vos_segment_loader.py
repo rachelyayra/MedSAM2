@@ -454,6 +454,61 @@ class BraTSSigmentLoader:
 
         return self.mask
     
+
+class BraTSTTASegmentLoader:
+    def __init__(self, mask_path):
+        """
+        Initialize the BraTS Mask Loader.
+        
+        Args:
+            masks (numpy.ndarray): Array of masks with shape (img_num, H, W).
+        """
+        self.mask_path = mask_path
+        self.mask = np.load(self.mask_path)
+
+
+    def load(self, frame_idx):
+        """
+        Load the single mask for the given frame index and convert it to binary segments.
+
+        Args:
+            frame_idx (int): Index of the frame to load.
+
+        Returns:
+            dict: A dictionary where keys are object IDs and values are binary masks.
+
+        """
+        # Correct the logic for loading masks
+        
+        
+        mask = self.mask[:, :, :, frame_idx]
+
+        mask = torch.as_tensor(mask)
+        target_mask = mask.argmax(dim=0).long()
+        print(f'The size stuff is great: {target_mask.unique()}')
+        binary_segments = {}
+        if  not torch.all(target_mask == 0):
+            binary_segments[0] = target_mask
+
+        return binary_segments
+
+    def load_mask(self):
+        """
+        Load the single mask for the given frame index and convert it to binary segments.
+
+        Args:
+            frame_idx (int): Index of the frame to load.
+
+        Returns:
+            dict: A dictionary where keys are object IDs and values are binary masks.
+
+        """
+        # Correct the logic for loading masks
+        
+    
+
+        return self.mask
+    
 class TestSegmentLoader:
     def __init__(self):
         """

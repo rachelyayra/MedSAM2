@@ -14,7 +14,7 @@ from tqdm import tqdm
 
 from sam2.modeling.sam2_base_soft import NO_OBJ_SCORE, SAM2Base
 from sam2.utils.misc import concat_points, fill_holes_in_mask_scores, load_video_frames
-
+import numpy as np
 
 class SAM2VideoPredictorNPZ(SAM2Base):
     """The predictor class to handle user interactions and manage inference states."""
@@ -41,6 +41,7 @@ class SAM2VideoPredictorNPZ(SAM2Base):
         self.clear_non_cond_mem_for_multi_obj = clear_non_cond_mem_for_multi_obj
         self.add_all_frames_to_correct_as_cond = add_all_frames_to_correct_as_cond
         self.pred_option = True
+        self.name = ''
 
     @torch.inference_mode()
     def init_state(
@@ -302,6 +303,7 @@ class SAM2VideoPredictorNPZ(SAM2Base):
             # them into memory.
             run_mem_encoder=False,
             prev_sam_mask_logits=prev_sam_mask_logits,
+            save_vision_feats=True,
         )
         # Add the output to the output dict (to be used as future memory)
         obj_temp_output_dict[storage_key][frame_idx] = current_out
@@ -936,6 +938,7 @@ class SAM2VideoPredictorNPZ(SAM2Base):
         reverse,
         run_mem_encoder,
         prev_sam_mask_logits=None,
+        save_vision_feats=False,
     ):
         """Run tracking on a single frame based on current inputs and previous memory."""
         # Retrieve correct image features
@@ -965,6 +968,15 @@ class SAM2VideoPredictorNPZ(SAM2Base):
             prev_sam_mask_logits=prev_sam_mask_logits,
             
         )
+        if save_vision_feats:
+            image, backbone_out = inference_state["cached_features"].get(
+            frame_idx, (None, None)
+        )
+            np.save(f"/scratch_net/ken/radjoe/Projects/Experiments/SAMEXP/extracted_feats/decoder_feats/{self.name}.npy", current_out['upscaled_embedding'].cpu().numpy())
+            np.save(f"/scratch_net/ken/radjoe/Projects/Experiments/SAMEXP/extracted_feats/conditioned_feats/{self.name}.npy", current_out["sam_output_tokens"].cpu().numpy())
+            np.save(f"/scratch_net/ken/radjoe/Projects/Experiments/SAMEXP/extracted_feats/vision_feats/{self.name}.npy", backbone_out['vision_features'].cpu().numpy())
+            np.save(f"/scratch_net/ken/radjoe/Projects/Experiments/SAMEXP/extracted_feats/save_q/{self.name}.npy", current_out['save_q'].cpu().numpy())
+            np.save(f"/scratch_net/ken/radjoe/Projects/Experiments/SAMEXP/extracted_feats/save_k/{self.name}.npy", current_out['save_k'].cpu().numpy())
 
         # optionally offload the output to CPU memory to save GPU space
         storage_device = inference_state["storage_device"]

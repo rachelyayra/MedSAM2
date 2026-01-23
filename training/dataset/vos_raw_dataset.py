@@ -28,7 +28,8 @@ from training.dataset.vos_segment_loader import (
     BraTSSegmentLoader,
     BraTSSigmentLoader,
     TestSegmentLoader,
-    NPZSegmentLoader
+    NPZSegmentLoader,
+    BraTSTTASegmentLoader
 )
 
 def renormalize(arr):
@@ -499,6 +500,77 @@ class BraTSSigDataset(VOSRawDataset):
 
         video = VOSVideo(video_name, video_idx, frames)
         return video, segment_loader
+
+
+class BraTSTTADataset(VOSRawDataset):
+    def __init__(
+        self,
+        img_folder,
+        gt_folder,
+        sup_sample,
+        sup_label,
+        file_list_txt
+        ):
+        self.folder_path = img_folder
+        self.gt_path = gt_folder
+        self.video_names = [i for i in sorted(os.listdir(img_folder)) if i.endswith('.npy')]
+        self.sup_sample = sup_sample
+        self.sup_label = sup_label
+        self.curr_vid = ''
+    
+
+    def __len__(self):
+        return len(self.video_names)
+
+
+    def get_video(self, video_idx):
+        # print(f'This is the length of the video {len(self.video_names)}')
+        video_name = self.video_names[video_idx]
+        self.curr_vid = video_name
+        # video_name = os.path.join(self.folder_path, video_name_temp, self.data_dict[acc_idx])
+        video_frame_path = os.path.join(self.folder_path, video_name)
+        
+        full_video = np.load(video_frame_path)
+        full_sup = np.load(self.sup_sample)
+
+        full_video = np.delete(full_video, 1, axis=0)
+        full_sup = np.delete(full_sup, 1, axis=0)
+        
+        label_name = video_name[:-8]
+
+        for i in range(full_video.shape[0]):
+            full_video[i] = renormalize(full_video[i])
+            full_sup[i] = renormalize(full_sup[i])
+        
+        full_video = torch.from_numpy(full_video)
+        full_video = torch.permute(full_video, (3, 0, 1, 2))
+
+        full_sup = torch.from_numpy(full_sup)
+        full_sup = torch.permute(full_sup, (3, 0, 1, 2))
+
+        label = [i for i in os.listdir(self.gt_path) if (label_name in i and i.endswith('.npy')) ][0]
+
+        
+        label_path = os.path.join(self.gt_path, label)
+        
+        segment_loader = BraTSSigmentLoader(
+        mask_path = label_path
+        )
+
+        sup_loader = BraTSTTASegmentLoader(
+        mask_path = self.sup_label
+        )        
+        frames = []
+        for frame_idx in range(160):
+            frames.append(VOSFrame(frame_idx, image_path='null', data = full_video[frame_idx] ))
+
+        frames_sup = []
+        for frame_idx in range(160):
+            frames_sup.append(VOSFrame(frame_idx, image_path='null', data = full_sup[frame_idx] ))
+        video = VOSVideo(video_name, video_idx, frames)
+        sup_video = VOSVideo(video_name,1, frames_sup  )
+        return video, segment_loader, sup_video, sup_loader
+    
 
 class TestDataset(VOSRawDataset):
     def __init__(self):

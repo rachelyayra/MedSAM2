@@ -15,7 +15,6 @@ from sam2.modeling.sam2_utils import (
     get_next_point,
     sample_box_points,
     select_closest_cond_frames,
-    get_points_from_box,
 )
 
 from sam2.utils.misc import concat_points
@@ -67,13 +66,12 @@ class SAM2Train(SAM2Base):
         # of all frames at once. This avoids backbone OOM errors on very long videos in evaluation, but could be slightly slower.
         forward_backbone_per_frame_for_eval=False,
         freeze_image_encoder=False,
-        freeze_all=False,
         **kwargs,
     ):
         super().__init__(image_encoder, memory_attention, memory_encoder, **kwargs)
         self.use_act_ckpt_iterative_pt_sampling = use_act_ckpt_iterative_pt_sampling
         self.forward_backbone_per_frame_for_eval = forward_backbone_per_frame_for_eval
-        self.pred_option = False
+
         # Point sampler and conditioning frames
         self.prob_to_use_pt_input_for_train = prob_to_use_pt_input_for_train
         self.prob_to_use_box_input_for_train = prob_to_use_box_input_for_train
@@ -106,31 +104,14 @@ class SAM2Train(SAM2Base):
             for p in self.image_encoder.parameters():
                 p.requires_grad = False
 
-        if freeze_all:
-            # for p in self.image_encoder.parameters():
-            #     p.requires_grad = False
-            # for p in self.sam_mask_decoder.parameters():
-            #     p.requires_grad = False
-            # for p in self.memory_attention.parameters():
-            #     p.requires_grad = False
-            # for p in self.memory_encoder.parameters():
-            #     p.requires_grad = False
-            
-                for name, param in self.sam_mask_decoder.named_parameters():
-                    if name.startswith("decoder_adapter."):
-                        param.requires_grad = False
-
     def forward(self, input: BatchedVideoDatapoint):
-
         if self.training or not self.forward_backbone_per_frame_for_eval:
             # precompute image features on all frames before tracking
             backbone_out = self.forward_image(input.flat_img_batch)
-
         else:
             # defer image feature computation on a frame until it's being tracked
             backbone_out = {"backbone_fpn": None, "vision_pos_enc": None}
         backbone_out = self.prepare_prompt_inputs(backbone_out, input)
-
         previous_stages_out = self.forward_tracking(backbone_out, input)
 
         return previous_stages_out
@@ -145,7 +126,6 @@ class SAM2Train(SAM2Base):
             unique_img_ids, inv_ids = img_ids, None
 
         # Compute the image features on those unique image ids
-       
         image = img_batch[unique_img_ids]
         backbone_out = self.forward_image(image)
         (
@@ -174,8 +154,6 @@ class SAM2Train(SAM2Base):
         #     stage_id: targets.segments.unsqueeze(1)  # [B, 1, H_im, W_im]
         #     for stage_id, targets in enumerate(input.find_targets)
         # }
-
-        
         gt_masks_per_frame = {
             stage_id: masks.unsqueeze(1)  # [B, 1, H_im, W_im]
             for stage_id, masks in enumerate(input.masks)
@@ -244,23 +222,15 @@ class SAM2Train(SAM2Base):
         backbone_out["mask_inputs_per_frame"] = {}  # {frame_idx: <input_masks>}
         backbone_out["point_inputs_per_frame"] = {}  # {frame_idx: <input_points>}
         for t in init_cond_frames:
-            img_ids = input.flat_obj_to_img_idx[t]
-            
             if not use_pt_input:
-                #  if use_pt_input is false, use mask
                 backbone_out["mask_inputs_per_frame"][t] = gt_masks_per_frame[t]
             else:
                 # During training # P(box) = prob_to_use_pt_input * prob_to_use_box_input
-
-                # 
                 use_box_input = self.rng.random() < prob_to_use_box_input
                 if use_box_input:
                     points, labels = sample_box_points(
-                        gt_masks_per_frame[t], img_ids,
+                        gt_masks_per_frame[t],
                     )
-                    # points, labels = get_points_from_box(
-                    #     gt_masks_per_frame[t], self.point_selector,
-                    # )                    
                 else:
                     # (here we only sample **one initial point** on initial conditioning frames from the
                     # ground-truth mask; we may sample more correction points on the fly)
@@ -274,6 +244,7 @@ class SAM2Train(SAM2Base):
 
                 point_inputs = {"point_coords": points, "point_labels": labels}
                 backbone_out["point_inputs_per_frame"][t] = point_inputs
+
         # Sample frames where we will add correction clicks on the fly
         # based on the error between prediction and ground-truth masks
         if not use_pt_input:
@@ -310,7 +281,6 @@ class SAM2Train(SAM2Base):
                 feat_sizes,
             ) = self._prepare_backbone_features(backbone_out)
 
-        
         # Starting the stage loop
         num_frames = backbone_out["num_frames"]
         init_cond_frames = backbone_out["init_cond_frames"]
@@ -322,13 +292,10 @@ class SAM2Train(SAM2Base):
             "cond_frame_outputs": {},  # dict containing {frame_idx: <out>}
             "non_cond_frame_outputs": {},  # dict containing {frame_idx: <out>}
         }
-
         for stage_id in processing_order:
             # Get the image features for the current frames
             # img_ids = input.find_inputs[stage_id].img_ids
             img_ids = input.flat_obj_to_img_idx[stage_id]
-            img_ids = torch.unique(img_ids)
-
             if img_feats_already_computed:
                 # Retrieve image features according to img_ids (if they are already computed).
                 current_vision_feats = [x[:, img_ids] for x in vision_feats]
@@ -415,6 +382,7 @@ class SAM2Train(SAM2Base):
             track_in_reverse,
             prev_sam_mask_logits,
         )
+
         (
             low_res_multimasks,
             high_res_multimasks,
@@ -423,6 +391,7 @@ class SAM2Train(SAM2Base):
             high_res_masks,
             obj_ptr,
             object_score_logits,
+            upscaled_embedding,
         ) = sam_outputs
 
         current_out["multistep_pred_masks"] = low_res_masks
@@ -432,6 +401,7 @@ class SAM2Train(SAM2Base):
         current_out["multistep_pred_ious"] = [ious]
         current_out["multistep_point_inputs"] = [point_inputs]
         current_out["multistep_object_score_logits"] = [object_score_logits]
+
         # Optionally, sample correction points iteratively to correct the mask
         if frame_idx in frames_to_add_correction_pt:
             point_inputs, final_sam_outputs = self._iter_correct_pt_sampling(
@@ -446,6 +416,7 @@ class SAM2Train(SAM2Base):
                 low_res_masks,
                 high_res_masks,
                 object_score_logits,
+                upscaled_embedding,
                 current_out,
             )
             (
@@ -456,11 +427,14 @@ class SAM2Train(SAM2Base):
                 high_res_masks,
                 obj_ptr,
                 object_score_logits,
+                upscaled_embedding,
             ) = final_sam_outputs
+
         # Use the final prediction (after all correction steps for output and eval)
         current_out["pred_masks"] = low_res_masks
         current_out["pred_masks_high_res"] = high_res_masks
         current_out["obj_ptr"] = obj_ptr
+
         # Finally run the memory encoder on the predicted mask to encode
         # it into a new memory feature (that can be used in future frames)
         self._encode_memory_in_output(
@@ -471,7 +445,6 @@ class SAM2Train(SAM2Base):
             high_res_masks,
             object_score_logits,
             current_out,
-            
         )
         return current_out
 
@@ -488,6 +461,7 @@ class SAM2Train(SAM2Base):
         low_res_masks,
         high_res_masks,
         object_score_logits,
+        upscaled_embedding,
         current_out,
     ):
 
@@ -499,19 +473,9 @@ class SAM2Train(SAM2Base):
         all_pred_ious = [ious]
         all_point_inputs = [point_inputs]
         all_object_score_logits = [object_score_logits]
-        masks_grouped = gt_masks.view(-1, 3, *gt_masks.shape[-2:])  # Group every 3
-
-            # Sum across the grouped dimension (dim=1)
-        gt_masks = torch.sum(masks_grouped, dim=1)  # Result shape: (N//3, H, W)
-        gt_masks = gt_masks.unsqueeze(1)
-        gt_masks =  gt_masks > 0  
-
-        for i in range(self.num_correction_pt_per_frame):
-            # I think that the iter_samplining could have multi class points
-
+        for _ in range(self.num_correction_pt_per_frame):
             # sample a new point from the error between prediction and ground-truth
             # (with a small probability, directly sample from GT masks instead of errors)
-
             if self.training and self.prob_to_sample_from_gt_for_train > 0:
                 sample_from_gt = (
                     self.rng.random() < self.prob_to_sample_from_gt_for_train
@@ -519,9 +483,7 @@ class SAM2Train(SAM2Base):
             else:
                 sample_from_gt = False
             # if `pred_for_new_pt` is None, only GT masks will be used for point sampling
-
             pred_for_new_pt = None if sample_from_gt else (high_res_masks > 0)
-
             new_points, new_labels = get_next_point(
                 gt_masks=gt_masks,
                 pred_masks=pred_for_new_pt,
@@ -540,7 +502,7 @@ class SAM2Train(SAM2Base):
                     point_inputs=point_inputs,
                     mask_inputs=mask_inputs,
                     high_res_features=high_res_features,
-                    multimask_output=True,
+                    multimask_output=multimask_output,
                     use_reentrant=False,
                 )
             else:
@@ -549,7 +511,7 @@ class SAM2Train(SAM2Base):
                     point_inputs=point_inputs,
                     mask_inputs=mask_inputs,
                     high_res_features=high_res_features,
-                    multimask_output=True,
+                    multimask_output=multimask_output,
                 )
             (
                 low_res_multimasks,
@@ -559,6 +521,7 @@ class SAM2Train(SAM2Base):
                 high_res_masks,
                 _,
                 object_score_logits,
+                upscaled_embedding, 
             ) = sam_outputs
             all_pred_masks.append(low_res_masks)
             all_pred_high_res_masks.append(high_res_masks)
@@ -579,5 +542,5 @@ class SAM2Train(SAM2Base):
         current_out["multistep_pred_ious"] = all_pred_ious
         current_out["multistep_point_inputs"] = all_point_inputs
         current_out["multistep_object_score_logits"] = all_object_score_logits
-        
+
         return point_inputs, sam_outputs

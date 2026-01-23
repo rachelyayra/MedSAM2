@@ -67,6 +67,7 @@ class SAM2Train(SAM2Base):
         # of all frames at once. This avoids backbone OOM errors on very long videos in evaluation, but could be slightly slower.
         forward_backbone_per_frame_for_eval=False,
         freeze_image_encoder=False,
+        unfreeze_early_layers = False,
         freeze_all=False,
         **kwargs,
     ):
@@ -106,6 +107,28 @@ class SAM2Train(SAM2Base):
             for p in self.image_encoder.parameters():
                 p.requires_grad = False
 
+        # if unfreeze_early_layers:
+        #     for n, p in self.image_encoder.named_parameters():
+        #         print(f'name: {n}')
+        #         if n.startswith("trunk.patch_embed"):
+        #             p.requires_grad = True
+
+        #     for n, p in self.image_encoder.named_parameters():
+        #         for i in range(1):
+        #             if n.startswith(f"trunk.blocks.{i}"):
+        #                 p.requires_grad = True
+
+        if unfreeze_early_layers:
+            for n, p in self.image_encoder.named_parameters():
+                print(f'name: {n}')
+                if n.startswith("trunk.patch_embed"):
+                    p.requires_grad = True
+
+            for n, p in self.image_encoder.named_parameters():
+                for i in range(4):
+                    if n.startswith(f"trunk.blocks.{i}.norm1") or n.startswith(f"trunk.blocks.{i}.norm2"):
+                        p.requires_grad = True
+                        
         if freeze_all:
             for p in self.image_encoder.parameters():
                 p.requires_grad = False
@@ -126,6 +149,10 @@ class SAM2Train(SAM2Base):
                 if name.startswith("output_hypernetworks_mlps"):
                     p.requires_grad = True
 
+        trainable = [(n, p.numel()) for n, p in self.image_encoder.named_parameters() if p.requires_grad]
+        print(f"Trainable tensors: {len(trainable)}, Trainable params: {sum(x[1] for x in trainable):,}")
+        for n, _ in trainable[:20]:
+            print("  ", n)
     def forward(self, input: BatchedVideoDatapoint):
 
         if self.training or not self.forward_backbone_per_frame_for_eval:
@@ -432,6 +459,9 @@ class SAM2Train(SAM2Base):
             obj_ptr,
             object_score_logits,
             upscaled_embedding,
+            sam_tokens,
+                _,
+                _,
         ) = sam_outputs
 
         current_out["multistep_pred_masks"] = low_res_masks
@@ -442,6 +472,7 @@ class SAM2Train(SAM2Base):
         current_out["multistep_point_inputs"] = [point_inputs]
         current_out["multistep_object_score_logits"] = [object_score_logits]
         current_out["multistep_upscaled_embeddings"] = [upscaled_embedding]
+        current_out["multistep_sam_tokens"] = [sam_tokens]
         # Optionally, sample correction points iteratively to correct the mask
         if frame_idx in frames_to_add_correction_pt:
             point_inputs, final_sam_outputs = self._iter_correct_pt_sampling(
@@ -457,6 +488,7 @@ class SAM2Train(SAM2Base):
                 high_res_masks,
                 object_score_logits,
                 upscaled_embedding,
+                sam_tokens,
                 current_out,
             )
             (
@@ -468,6 +500,9 @@ class SAM2Train(SAM2Base):
                 obj_ptr,
                 object_score_logits,
                 upscaled_embedding,
+                _,
+                _,
+                _,
             ) = final_sam_outputs
         # Use the final prediction (after all correction steps for output and eval)
         current_out["pred_masks"] = low_res_masks
@@ -501,6 +536,7 @@ class SAM2Train(SAM2Base):
         high_res_masks,
         object_score_logits,
         upscaled_embedding,
+        sam_tokens,
         current_out,
     ):
 
@@ -513,6 +549,7 @@ class SAM2Train(SAM2Base):
         all_point_inputs = [point_inputs]
         all_object_score_logits = [object_score_logits]
         all_upscaled_embeddings = [upscaled_embedding]
+        all_sam_tokens = [sam_tokens]
         # masks_grouped = gt_masks.view(-1, 3, *gt_masks.shape[-2:])  # Group every 3
 
             # Sum across the grouped dimension (dim=1)
@@ -576,6 +613,9 @@ class SAM2Train(SAM2Base):
                 _,
                 object_score_logits,
                 upscaled_embedding,
+                sam_tokens,
+                _,
+                _,
             ) = sam_outputs
             all_pred_masks.append(low_res_masks)
             all_pred_high_res_masks.append(high_res_masks)
@@ -585,6 +625,7 @@ class SAM2Train(SAM2Base):
             all_point_inputs.append(point_inputs)
             all_object_score_logits.append(object_score_logits)
             all_upscaled_embeddings.append(upscaled_embedding)
+            all_sam_tokens.append(sam_tokens)
 
         # Concatenate the masks along channel (to compute losses on all of them,
         # using `MultiStepIteractiveMasks`)
@@ -598,5 +639,5 @@ class SAM2Train(SAM2Base):
         current_out["multistep_point_inputs"] = all_point_inputs
         current_out["multistep_object_score_logits"] = all_object_score_logits
         current_out["multistep_upscaled_embeddings"] = all_upscaled_embeddings
-        
+        current_out["multistep_all_sam_tokens"] = all_sam_tokens
         return point_inputs, sam_outputs

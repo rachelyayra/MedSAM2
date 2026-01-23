@@ -363,6 +363,8 @@ class SAM2Base(torch.nn.Module):
             sam_output_tokens,
             object_score_logits,
             upscaled_embedding,
+            save_q, 
+            save_k,
         ) = self.sam_mask_decoder(
             image_embeddings=backbone_features,
             image_pe=self.sam_prompt_encoder.get_dense_pe(),
@@ -430,7 +432,10 @@ class SAM2Base(torch.nn.Module):
             high_res_masks,
             obj_ptr,
             object_score_logits,
-            upscaled_embedding
+            upscaled_embedding,
+            sam_output_tokens,
+            save_q, 
+            save_k,
         )
 
     def _use_mask_as_output(self, backbone_features, high_res_features, mask_inputs):
@@ -486,7 +491,7 @@ class SAM2Base(torch.nn.Module):
             )
         else:
             # produce an object pointer using the SAM decoder from the mask input
-            _, _, _, _, _, obj_ptr, _, _ = self._forward_sam_heads(
+            _, _, _, _, _, obj_ptr, _, _, _, _ = self._forward_sam_heads(
                 backbone_features=backbone_features,
                 mask_inputs=self.mask_downsample(mask_inputs_float),
                 high_res_features=high_res_features,
@@ -930,6 +935,9 @@ class SAM2Base(torch.nn.Module):
             obj_ptr,
             object_score_logits,
             upscaled_embedding,
+            sam_output_tokens,
+            save_q, 
+            save_k,
         ) = sam_outputs
         if self.pred_option:
             for k in range(high_res_masks.shape[1]):
@@ -951,6 +959,10 @@ class SAM2Base(torch.nn.Module):
         current_out["pred_masks"] = high_res_masks
         current_out["pred_masks_high_res"] = high_res_masks
         current_out["obj_ptr"] = obj_ptr
+        current_out["upscaled_embedding"] = upscaled_embedding
+        current_out["sam_output_tokens"] = sam_output_tokens
+        current_out["save_q"] = save_q
+        current_out["save_k"] = save_k
         if not self.training:
             # Only add this in inference (to avoid unused param in activation checkpointing;
             # it's mainly used in the demo to encode spatial memories w/ consolidated masks)

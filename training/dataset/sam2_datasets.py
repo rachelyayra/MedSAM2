@@ -23,6 +23,7 @@ class MixedDataLoader:
             mixing_prob (torch.FloatTensor): Probability of each dataloader to be sampled from
 
         """
+        print(f"Length of dataloader{len(dataloaders)}, Mixing Probability {mixing_prob.shape}")
         assert len(dataloaders) == mixing_prob.shape[0]
         self.dataloaders = dataloaders
         self.mixing_prob = mixing_prob
@@ -110,6 +111,7 @@ class TorchTrainMixedDataset:
             self._set_dataset_epoch(dataset, 0)
         self.phases_per_epoch = phases_per_epoch
         self.chunks = [None] * len(datasets)
+        
         if dataset_prob is None:
             # If not provided, assign each dataset a probability proportional to its length.
             dataset_lens = [
@@ -119,6 +121,7 @@ class TorchTrainMixedDataset:
             total_len = sum(dataset_lens)
             dataset_prob = torch.tensor([d_len / total_len for d_len in dataset_lens])
         else:
+            
             assert len(dataset_prob) == len(datasets)
             dataset_prob = torch.tensor(dataset_prob)
 
@@ -136,9 +139,11 @@ class TorchTrainMixedDataset:
 
     def get_loader(self, epoch) -> Iterable:
         dataloaders = []
+        # print(f'The index: {len(self.)}')
         for d_idx, (dataset, batch_size) in enumerate(
             zip(self.datasets, self.batch_sizes)
-        ):
+        ):  
+            print(f'The index: {d_idx}')
             if self.phases_per_epoch > 1:
                 # Major epoch that looops over entire dataset
                 # len(main_epoch) == phases_per_epoch * len(epoch)
@@ -165,6 +170,126 @@ class TorchTrainMixedDataset:
             else:
                 self._set_dataset_epoch(dataset, epoch)
 
+            sampler = DistributedSampler(dataset, shuffle=self.shuffle)
+            sampler.set_epoch(epoch)
+
+            batch_sampler = BatchSampler(sampler, batch_size, drop_last=self.drop_last)
+            dataloaders.append(
+                DataLoader(
+                    dataset,
+                    num_workers=self.num_workers,
+                    pin_memory=self.pin_memory,
+                    batch_sampler=batch_sampler,
+                    collate_fn=self.collate_fn,
+                    worker_init_fn=self.worker_init_fn,
+                )
+            )
+            
+        return MixedDataLoader(dataloaders, self.dataset_prob)
+
+class TorchTrainMixedTTADataset:
+    def __init__(
+        self,
+        datasets: List[Dataset],
+        batch_sizes: List[int],
+        num_workers: int,
+        shuffle: bool,
+        pin_memory: bool,
+        drop_last: bool,
+        collate_fn: Optional[Callable] = None,
+        worker_init_fn: Optional[Callable] = None,
+        phases_per_epoch: int = 1,
+        dataset_prob: Optional[List[float]] = None,
+    ) -> None:
+        """
+        Args:
+            datasets (List[Dataset]): List of Datasets to be mixed.
+            batch_sizes (List[int]): Batch sizes for each dataset in the list.
+            num_workers (int): Number of workers per dataloader.
+            shuffle (bool): Whether or not to shuffle data.
+            pin_memory (bool): If True, use pinned memory when loading tensors from disk.
+            drop_last (bool): Whether or not to drop the last batch of data.
+            collate_fn (Callable): Function to merge a list of samples into a mini-batch.
+            worker_init_fn (Callable): Function to init each dataloader worker.
+            phases_per_epoch (int): Number of phases per epoch.
+            dataset_prob (List[float]): Probability of choosing the dataloader to sample from. Should sum to 1.0
+        """
+
+        self.datasets = datasets
+        self.batch_sizes = batch_sizes
+        self.num_workers = num_workers
+        self.shuffle = shuffle
+        self.pin_memory = pin_memory
+        self.drop_last = drop_last
+        self.collate_fn = collate_fn
+        self.worker_init_fn = worker_init_fn
+        assert len(self.datasets) > 0
+        for dataset in self.datasets:
+            assert not isinstance(dataset, IterableDataset), "Not supported"
+            # `RepeatFactorWrapper` requires calling set_epoch first to get its length
+            self._set_dataset_epoch(dataset, 0)
+        self.phases_per_epoch = phases_per_epoch
+        self.chunks = [None] * len(datasets)
+        if dataset_prob is None:
+            # If not provided, assign each dataset a probability proportional to its length.
+            dataset_lens = [
+                (math.floor(len(d) / bs) if drop_last else math.ceil(len(d) / bs))
+                for d, bs in zip(datasets, batch_sizes)
+            ]
+            total_len = sum(dataset_lens)
+            dataset_prob = torch.tensor([d_len / total_len for d_len in dataset_lens])
+        else:
+            print(f'Dataset Prob: {len(dataset_prob), len(datasets)}')
+            assert len(dataset_prob) == len(datasets)
+            dataset_prob = torch.tensor(dataset_prob)
+
+        print(f"Dataset mixing probabilities: {len(datasets)}")
+
+        logging.info(f"Dataset mixing probabilities: {dataset_prob.tolist()}")
+        assert dataset_prob.sum().item() == 1.0, "Probabilities should sum to 1.0"
+        self.dataset_prob = dataset_prob
+
+    def _set_dataset_epoch(self, dataset, epoch: int) -> None:
+        if hasattr(dataset, "epoch"):
+            dataset.epoch = epoch
+        if hasattr(dataset, "set_epoch"):
+            dataset.set_epoch(epoch)
+
+    def get_loader(self, epoch) -> Iterable:
+        dataloaders = []
+        self.batch_sizes = [1,1]
+        print(f" Print Length of dataset{len(self.datasets), self.batch_sizes}")
+        print(f" Print Length of dataset{type(self.datasets), type(self.batch_sizes)}")
+        for d_idx, (dataset, batch_size) in enumerate(
+            zip(self.datasets, self.batch_sizes)
+        ):  
+            print(f'The index: {d_idx}')
+            if self.phases_per_epoch > 1:
+                # Major epoch that looops over entire dataset
+                # len(main_epoch) == phases_per_epoch * len(epoch)
+                main_epoch = epoch // self.phases_per_epoch
+                print(f'Run1_{d_idx}')
+                # Phase with in the main epoch
+                local_phase = epoch % self.phases_per_epoch
+
+                # Start of new data-epoch or job is resumed after preemtion.
+                if local_phase == 0 or self.chunks[d_idx] is None:
+                    # set seed for dataset epoch
+                    # If using RepeatFactorWrapper, this step currectly re-samples indices before chunking.
+                    self._set_dataset_epoch(dataset, main_epoch)
+
+                    # Separate random generator for subset sampling
+                    g = torch.Generator()
+                    g.manual_seed(main_epoch)
+                    self.chunks[d_idx] = torch.chunk(
+                        torch.randperm(len(dataset), generator=g),
+                        self.phases_per_epoch,
+                    )
+
+                dataset = Subset(dataset, self.chunks[d_idx][local_phase])
+            else:
+                self._set_dataset_epoch(dataset, epoch)
+            print(f'Run2_{d_idx}')
             sampler = DistributedSampler(dataset, shuffle=self.shuffle)
             sampler.set_epoch(epoch)
 

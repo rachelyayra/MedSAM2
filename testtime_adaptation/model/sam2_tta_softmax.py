@@ -27,6 +27,7 @@ from sam2.modeling.sam2_base import NO_OBJ_SCORE, SAM2Base
 from sam2.utils.misc import concat_points, fill_holes_in_mask_scores, load_video_frames
 from torchvision.ops import masks_to_boxes
 import torch.nn.functional as F
+from torchvision.utils import save_image
 
 class SAM2TestTime(SAM2Train):
     """The predictor class to handle TTA for both batched and non batched interactions."""
@@ -1328,13 +1329,34 @@ class SAM2TestTime(SAM2Train):
             obj_ptr,
             object_score_logits,
             upscaled_embedding,
+            sam_output_tokens,
+            save_q, 
+            save_k,
         ) = sam_outputs
+        if self.pred_option:
+            for k in range(high_res_masks.shape[1]):
+                save_image(high_res_masks[:,k], f'high_res_mask_frame_{frame_idx}_{k}.png')
+
+            probs  = torch.softmax(low_res_masks, dim=1)
+            labels = probs.argmax(dim=1)            # [B,H,W], ints {0..3}
+            low_res_masks = F.one_hot(labels, num_classes=4).permute(0,3,1,2).float()
+
+            probs_h  = torch.softmax(high_res_masks, dim=1)
+            labels_h = probs_h.argmax(dim=1)             # [B,H,W], ints {0..3}
+            high_res_masks = F.one_hot(labels_h, num_classes=4).permute(0,3,1,2).float()
+            # margin_rep = margins_report(high_res_masks)
+            # print(f'Margin report: {margin_rep}')
+
+            save_image(labels_h[0].float(), f'high_res_mask_final_{frame_idx}.png')
 
         print(f'The pred mask shapes: {low_res_masks.shape}')
-        current_out["pred_masks"] = low_res_masks
+        current_out["pred_masks"] = high_res_masks
         current_out["pred_masks_high_res"] = high_res_masks
         current_out["obj_ptr"] = obj_ptr
-        print(f'TRAINING: {self.training}')
+        current_out["upscaled_embedding"] = upscaled_embedding
+        current_out["sam_output_tokens"] = sam_output_tokens
+        current_out["save_q"] = save_q
+        current_out["save_k"] = save_k
         if not self.training:
             # Only add this in inference (to avoid unused param in activation checkpointing;
             # it's mainly used in the demo to encode spatial memories w/ consolidated masks)

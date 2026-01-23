@@ -2,23 +2,23 @@
 
 scratch:
   resolution: 512
-  train_video_batch_size: 32
+  train_video_batch_size: 2
   num_train_workers: 0
   num_frames: 8
   max_num_objects: 5
-  base_lr: 5.0e-2
-  vision_lr: 3.0e-2
+  base_lr: 5.0e-4
+  vision_lr: 3.0e-4
   phases_per_epoch: 1
-  num_epochs: 500
+  num_epochs: 1000
 
 # Video transforms
 
 dataset:
   # PATHS to Dataset
-  img_folder: /scratch_net/ken/radjoe/BraTS/Training/images_UNN  # PATH to MOSE JPEGImages folder
-  gt_folder: /scratch_net/ken/radjoe/BraTS/Training/labels_UNN   # PATH to MOSE Annotations folder
-  val_folder: /scratch_net/ken/radjoe/BraTS/Validation/images_UNN  # PATH to MOSE JPEGImages folder
-  val_gt_folder: /scratch_net/ken/radjoe/BraTS/Validation/labels_UNN  # PATH to MOSE Annotations folder
+  img_folder: /scratch_net/ken/radjoe/BraTS/Sin_folder/images_UNN  # PATH to MOSE JPEGImages folder
+  gt_folder: /scratch_net/ken/radjoe/BraTS/Sin_folder/labels_UNN   # PATH to MOSE Annotations folder
+  val_folder: /scratch_net/ken/radjoe/BraTS/Sin_folder/images_UNN  # PATH to MOSE JPEGImages folder
+  val_gt_folder: /scratch_net/ken/radjoe/BraTS/Sin_folder/labels_UNN  # PATH to MOSE Annotations folder
   file_list_txt: null
   multiplier: 1
 # Video transforms
@@ -159,7 +159,7 @@ trainer:
       num_layers: 4
 
     memory_encoder:
-        _target_: sam2.modeling.memory_encoder.MemoryEncoder
+        _target_: sam2.modeling.memory_encoder.MemoryEncoderOriginal
         out_dim: 64
         position_encoding:
           _target_: sam2.modeling.position_encoding.PositionEmbeddingSine
@@ -168,12 +168,12 @@ trainer:
           scale: null
           temperature: 10000
         mask_downsampler:
-          _target_: sam2.modeling.memory_encoder.MaskDownSampler
+          _target_: sam2.modeling.memory_encoder.MaskDownSamplerOriginal
           kernel_size: 3
           stride: 2
           padding: 1
         fuser:
-          _target_: sam2.modeling.memory_encoder.Fuser
+          _target_: sam2.modeling.memory_encoder.FuserOriginal
           layer:
             _target_: sam2.modeling.memory_encoder.CXBlock
             dim: 256
@@ -272,7 +272,7 @@ trainer:
       pin_memory: True
       drop_last: True
       collate_fn:
-        _target_: training.utils.data_utils.collate_fn
+        _target_: training.utils.data_utils.collate_fn_3gt
         _partial_: true
         dict_key: all
 
@@ -305,7 +305,7 @@ trainer:
       pin_memory: True
       drop_last: false
       collate_fn:
-        _target_: training.utils.data_utils.collate_fn
+        _target_: training.utils.data_utils.collate_fn_3gt
         _partial_: true
         dict_key: all
     
@@ -359,7 +359,7 @@ trainer:
     all:
       _target_: training.loss_fns.MultiStepMultiMasksAndIous
       weight_dict:
-        loss_mask: 1
+        loss_mask: 20
         loss_dice: 1
         loss_iou: 1
         loss_class: 1

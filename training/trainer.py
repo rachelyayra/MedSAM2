@@ -161,7 +161,7 @@ class Trainer:
         mode: str = "train",
         accelerator: str = "cuda",
         seed_value: int = 123,
-        val_epoch_freq: int = 20,
+        val_epoch_freq: int = 5,
         distributed: Dict[str, bool] = None,
         cuda: Dict[str, bool] = None,
         env_variables: Optional[Dict[str, Any]] = None,
@@ -400,6 +400,15 @@ class Trainer:
                 self._call_model_initializer()
             self._load_resuming_checkpoint(ckpt_path)
 
+    def load_val_checkpoint(self, ckpt_path):
+        
+        if ckpt_path is None:
+            self._init_model_state()
+        else:
+            if self.checkpoint_conf.initialize_after_preemption:
+                self._call_model_initializer()
+            self._load_resuming_checkpoint(ckpt_path)
+
     def _init_model_state(self):
         # Checking that parameters that won't be saved are indeed frozen
         # We do this check here before even saving the model to catch errors
@@ -436,10 +445,11 @@ class Trainer:
 
         with g_pathmgr.open(ckpt_path, "rb") as f:
             checkpoint = torch.load(f, map_location="cpu")
-            print(f'The model dict: {checkpoint["model"]}')
+            # print(f'The model dict: {checkpoint["model"]}')
 
+            model_to_load = unwrap_ddp_if_wrapped(self.model)
             load_state_dict_into_model(
-            model=self.model,
+            model=model_to_load,
             state_dict=checkpoint["model"],
             ignore_missing_keys=self.checkpoint_conf.skip_saving_parameters,
         )
@@ -447,6 +457,7 @@ class Trainer:
         self.optim.optimizer.load_state_dict(checkpoint["optimizer"])
         self.loss.load_state_dict(checkpoint["loss"], strict=True)
         self.epoch = checkpoint["epoch"]
+        print(f'Loading checkpoint at epoch {self.epoch}')
         self.steps = checkpoint["steps"]
         self.ckpt_time_elapsed = checkpoint.get("time_elapsed")
 
@@ -474,17 +485,17 @@ class Trainer:
         outputs = model(batch)
         print(f'batch size {batch.img_batch.shape, len(outputs), len(outputs[0])}')
         
-        outs = collect_tensors(outputs)
+        
 
 
         # batch size (torch.Size([8, 1, 3, 512, 512]), 8, 13)
         targets = batch.masks
         batch_size = len(batch.img_batch)
 
-        print(f'batch size is checking here')
+        # print(f'batch size is checking here')
         if self.is_intermediate_val_epoch(self.epoch):
             self.log_validation_image(outputs, targets, self.logging_conf.log_dir )
-        print(f'batch size is checking here')
+        # print(f'batch size is checking here')
 
         key = batch.dict_key  # key for dataset
 
@@ -523,12 +534,12 @@ class Trainer:
                         find_metadatas=batch.metadata,
                     )
         trainable = [n for n,p in model.named_parameters() if p.requires_grad]
-        print("trainable count:", len(trainable))
+        # print("trainable count:", len(trainable))
         return ret_tuple
 
     def run(self):
-        print(f'This runs in code: {self.mode}')
-        assert self.mode in ["train", "train_only", "val"]
+        # print(f'This runs in code: {self.mode}')
+        assert self.mode in ["train", "train_only", "val", "all_val"], f"Unsupported mode {self.mode}"
         if self.mode == "train":
             if self.epoch > 0:
                 logging.info(f"Resuming training from epoch: {self.epoch}")
@@ -544,25 +555,44 @@ class Trainer:
             self.run_val()
         elif self.mode == "train_only":
             self.run_train()
+        elif self.mode == "all_val":
+            # Run validation on all epochs with checkpoints
+            val_ckpts_path = os.listdir('/scratch_net/ken/radjoe/Projects/Experiments/SAMEXP/logs/full_finetuning_augs/checkpoints')
+            val_ckpts = [
+                ckpt
+                for ckpt in val_ckpts_path
+                if ckpt.startswith("checkpoint_") and ckpt.endswith(".pt")
+            ]
+            val_ckpts = sorted(val_ckpts, key=lambda x: int(x.split("_")[1].split(".")[0]))
+            val_ckpts = [os.path.join('/scratch_net/ken/radjoe/Projects/Experiments/SAMEXP/logs/full_finetuning_augs/checkpoints', ckpt) for ckpt in val_ckpts]
+            
+            print(f'Val ckpts: {val_ckpts}')
+            val_epochs = len(val_ckpts)
+            print(f'Val epochs: {val_epochs}')
+            for epoch in range(val_epochs):
+                if epoch > 17:
+                    self.epoch = epoch
+                    self.load_val_checkpoint(val_ckpts[epoch])
+                    self.run_val()
 
     def _setup_dataloaders(self):
         self.train_dataset = None
         self.val_dataset = None
-        print(f'In dataloader: {self.mode}')
-        if self.mode in ["train", "val"]:
-            print(f'Instantiating validation dataset: {self.data_conf.get(Phase.VAL, None)}')
+        # print(f'In dataloader: {self.mode}')
+        if self.mode in ["train", "val", "all_val"]:
+            # print(f'Instantiating validation dataset: {self.data_conf.get(Phase.VAL, None)}')
             self.val_dataset = instantiate(self.data_conf.get(Phase.VAL, None))
 
         if self.mode in ["train", "train_only"]:
             self.train_dataset = instantiate(self.data_conf.train)
 
     def run_train(self):
-        print(f'This runs in code in run_train')
+        # print(f'This runs in code in run_train')
 
         while self.epoch < self.max_epochs:
             dataloader = self.train_dataset.get_loader(epoch=int(self.epoch))
             barrier()
-            print(f'This runs in code in run_train after getting dataloader')
+            # print(f'This runs in code in run_train after getting dataloader')
             outs = self.train_epoch(dataloader)
             self.logger.log_dict(outs, self.epoch)  # Logged only on rank 0
 
@@ -599,9 +629,9 @@ class Trainer:
 
     def run_val(self):
         if not self.val_dataset:
-            print(f'No val dataset, returning')
+            # print(f'No val dataset, returning')
             return
-
+        # print(f'This runs in code in run_val at epoch {self.epoch}')
         dataloader = self.val_dataset.get_loader(epoch=int(self.epoch))
         outs = self.val_epoch(dataloader, phase=Phase.VAL)
         del dataloader
@@ -708,7 +738,7 @@ class Trainer:
 
             if data_iter % 10 == 0:
                 dist.barrier()
-        print(f'This runs in code in val_epoch after val_loader')
+        # print(f'This runs in code in val_epoch after val_loader')
         self.est_epoch_time[phase] = batch_time.avg * iters_per_epoch
         self._log_timers(phase)
         for model in curr_models:
@@ -771,11 +801,11 @@ class Trainer:
         # Model training loop
         self.model.train()
         end = time.time()
-        print(f'This runs in code in train_epoch: length of trainloader {len(train_loader)}')
+        # print(f'This runs in code in train_epoch: length of trainloader {len(train_loader)}')
 
         for data_iter, batch in enumerate(train_loader):
             # measure data loading time
-            print(f'This runs in code in {batch}')
+            # print(f'This runs in code in {batch}')
             
             data_times.append(data_time_meter.val)
             batch = batch.to(
@@ -783,7 +813,7 @@ class Trainer:
             )  # move tensors in a tensorclass
 
             try:
-                print(f'This runs in code in train_epoch after train_loader')
+                # print(f'This runs in code in train_epoch after train_loader')
                 self._run_step(batch, phase, loss_mts, extra_loss_mts)
 
                 # compute gradient and do optim step
@@ -813,42 +843,44 @@ class Trainer:
                                 param_group[option],
                                 self.steps[phase],
                             )
+                if (data_iter + 1) % 2 == 0:
+                    # Clipping gradients and detecting diverging gradients
+                    if self.gradient_clipper is not None:
+                        self.scaler.unscale_(self.optim.optimizer)
+                        self.gradient_clipper(model=self.model)
 
-                # Clipping gradients and detecting diverging gradients
-                if self.gradient_clipper is not None:
-                    self.scaler.unscale_(self.optim.optimizer)
-                    self.gradient_clipper(model=self.model)
+                    if self.gradient_logger is not None:
+                        self.gradient_logger(
+                            self.model, rank=self.distributed_rank, where=self.where
+                        )
 
-                if self.gradient_logger is not None:
-                    self.gradient_logger(
-                        self.model, rank=self.distributed_rank, where=self.where
+                    # Optimizer step: the scaler will make sure gradients are not
+                    # applied if the gradients are infinite
+                
+                    self.scaler.step(self.optim.optimizer)
+                    self.scaler.update()
+
+                    # measure elapsed time
+                    batch_time_meter.update(time.time() - end)
+                    end = time.time()
+
+                    self.time_elapsed_meter.update(
+                        time.time() - self.start_time + self.ckpt_time_elapsed
                     )
 
-                # Optimizer step: the scaler will make sure gradients are not
-                # applied if the gradients are infinite
-                self.scaler.step(self.optim.optimizer)
-                self.scaler.update()
+                    mem_meter.update(reset_peak_usage=True)
+                    if data_iter % self.logging_conf.log_freq == 0:
+                        progress.display(data_iter)
 
-                # measure elapsed time
-                batch_time_meter.update(time.time() - end)
-                end = time.time()
-
-                self.time_elapsed_meter.update(
-                    time.time() - self.start_time + self.ckpt_time_elapsed
-                )
-
-                mem_meter.update(reset_peak_usage=True)
-                if data_iter % self.logging_conf.log_freq == 0:
-                    progress.display(data_iter)
-
-                if data_iter % self.logging_conf.log_scalar_frequency == 0:
-                    # Log progress meters.
-                    for progress_meter in progress.meters:
-                        self.logger.log(
-                            os.path.join("Step_Stats", phase, progress_meter.name),
-                            progress_meter.val,
-                            self.steps[phase],
-                        )
+                    if data_iter % self.logging_conf.log_scalar_frequency == 0:
+                        # Log progress meters.
+                        for progress_meter in progress.meters:
+                            self.logger.log(
+                                os.path.join("Step_Stats", phase, progress_meter.name),
+                                progress_meter.val,
+                                self.steps[phase],
+                            )
+                    self.optim.zero_grad(set_to_none=True)
 
             # Catching NaN/Inf errors in the loss
             except FloatingPointError as e:
@@ -895,7 +927,7 @@ class Trainer:
         # it's important to set grads to None, especially with Adam since 0
         # grads will also update a model even if the step doesn't produce
         # gradients
-        self.optim.zero_grad(set_to_none=True)
+        
         with torch.cuda.amp.autocast(
             enabled=self.optim_conf.amp.enabled,
             dtype=get_amp_type(self.optim_conf.amp.amp_dtype),
@@ -1086,36 +1118,43 @@ class Trainer:
     def log_validation_image(self, output, target, savepath):
         savepaths = f'{savepath}/{self.epoch}'
         os.makedirs(savepaths, exist_ok=True)
-        print(f'Check unique: {target.unique(), target.shape}')
+        # print(f'Check unique: {target.unique(), target.shape}')
         targets_onehot = F.one_hot(target.squeeze(1).long(), 4)
-        print(f'Check shape of one_hot: {targets_onehot.shape}')
+        # print(f'Check shape of one_hot: {targets_onehot.shape}')
         targets_onehot = targets_onehot.permute(0, 1, 4, 2, 3).float()
         
         # targets_onehot = targets_onehot[:, 1:, :, :]  # drop channel 0
-        print(f'Check shape: {targets_onehot.shape}')
+        # print(f'Check shape: {targets_onehot.shape}')
         
         os.makedirs(savepaths,exist_ok=True)
         for frame_idx in range(len(output)):
-            print(f'This is the frame idx: {frame_idx}')
+            # print(f'This is the frame idx: {frame_idx}')
             if frame_idx == 0:
                 
                 step_list = output[frame_idx]['multistep_pred_multimasks_high_res']
 
-                print(f'List of steps: {len(step_list)}')
+                # print(f'List of steps: {len(step_list)}')
                 for step_idx in range(len(step_list)):
                     if step_idx == 0:
                         pred_save = step_list[step_idx]
-                        print(f'prediction saving: {pred_save.shape, target.shape}')
+                        # print(f'prediction saving: {pred_save.shape, target.shape}')
                         # pred_save = pred_save.squeeze(0)
                         
                         for idx in range(len(pred_save)):
                             
                             for clx in range(len(pred_save[idx])):
-                                color_target = colorize_mask(target[frame_idx,idx].cpu())
-                                save_image(color_target.float(), f'{savepaths}/gt_class{idx}.png')
-                                save_image(targets_onehot[frame_idx, idx,clx ].float(), f'{savepaths}/gt_class_{idx}_{clx}.png')
+                                # color_target = colorize_mask(target[frame_idx,idx].cpu())
+                                # save_image(color_target.float(), f'{savepaths}/gt_class{idx}.png')
+                                # save_image(targets_onehot[frame_idx, idx,clx ].float(), f'{savepaths}/gt_class_{idx}_{clx}.png')
                                 save_image(pred_save[idx, clx].float(), f'{savepaths}/pred_class_{idx}_{clx}.png') 
-                                print(f'Check shape: {target[frame_idx, idx, clx ].shape}')
+                                # print(f'Check shape: {target[frame_idx, idx, clx ].shape}')
+
+                            for clx in range(4):
+                                # color_target = colorize_mask(target[frame_idx,idx].cpu())
+                                # save_image(color_target.float(), f'{savepaths}/gt_class{idx}.png')
+                                save_image(targets_onehot[frame_idx, idx,clx ].float(), f'{savepaths}/gt_class_{idx}_{clx}.png')
+                                # save_image(pred_save[idx, clx].float(), f'{savepaths}/pred_class_{idx}_{clx}.png') 
+                                # print(f'Check shape: {target[frame_idx, idx, clx ].shape}')
                                  
 
 
@@ -1266,7 +1305,7 @@ def colorize_mask(mask, palette=None):
             [0,0,255],    # class 3 -> blue
         ], dtype=torch.uint8)
 
-    print(f'colorize mask shape; {mask.shape}')
+    # print(f'colorize mask shape; {mask.shape}')
     mask = mask.squeeze(0)
     h,w = mask.shape
     mask_rgb = palette[mask.flatten()].view(h,w,3).permute(2,0,1)  # [3,H,W]

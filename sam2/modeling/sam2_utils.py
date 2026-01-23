@@ -225,7 +225,6 @@ def sample_box_points_softmax(
 
 def sample_box_points(
     masks: torch.Tensor,
-    img_ids: torch.Tensor,
     noise: float = 0.1,  # SAM default
     noise_bound: int = 20,  # SAM default
     top_left_label: int = 2,
@@ -243,30 +242,8 @@ def sample_box_points(
     - box_coords: [B, num_pt, 2], contains (x, y) coordinates of top left and bottom right box corners, dtype=torch.float
     - box_labels: [B, num_pt], label 2 is reserverd for top left and 3 for bottom right corners, dtype=torch.int32
     """
-    # print(f'The batch size of masks: {masks.shape}')
-    # for i in range(len(masks)):
-    #     print(f'shape: {masks[i].shape, torch.unique(masks[i])}')
-    #     save_image(masks[i].float(), f'separate_out_{i}.png') 
     device = masks.device
-    print(f'the mask {masks.shape}')
-    masks_grouped = masks.view(-1, 3, *masks.shape[1:])  # Group every 3
-
-    # Sum across the grouped dimension (dim=1)
-    masks = torch.sum(masks_grouped, dim=1)  # Result shape: (N//3, H, W)
-    print(f'the mask {masks.shape}')
-    masks =  masks > 0  
-    # masks = masks.unsqueeze(1)
-    # print(f'The batch size of masks: {masks.shape}')
-    # np_image = masks.cpu().detach().numpy()
-    # for i in range(len(masks)):
-    #     print(f'shape: {masks[i].shape, torch.unique(masks[i])}')
-    #     save_image(masks[i].float(), f'output_{i}.png') 
-    # masks = masks.to(torch.bool)
-    print(f'Atributes of masks: {masks.unique(), masks.shape}')
     box_coords = mask_to_box(masks)
-    # print(f'Box Coords {box_coords}')
-
-    # print(f'The Boxes before encoding: {box_coords.shape}')
     B, _, H, W = masks.shape
     box_labels = torch.tensor(
         [top_left_label, bottom_right_label], dtype=torch.int, device=device
@@ -290,6 +267,7 @@ def sample_box_points(
     box_coords = box_coords.reshape(-1, 2, 2)  # always 2 points
     box_labels = box_labels.reshape(-1, 2)
     return box_coords, box_labels
+
 
 
 def sample_random_points_from_errors(gt_masks, pred_masks, num_pt=1):

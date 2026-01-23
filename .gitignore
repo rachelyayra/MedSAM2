@@ -11,3 +11,7 @@ _C.*
 outputs/*
 checkpoints/*.pt
 *.pt
+results/*
+output_logs/*
+logs/*
+embeddings/*

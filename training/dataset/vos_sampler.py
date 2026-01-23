@@ -7,8 +7,11 @@
 import random
 from dataclasses import dataclass
 from typing import List
+import torch
 
 from training.dataset.vos_segment_loader import LazySegments
+from torchvision.ops import masks_to_boxes
+
 
 MAX_RETRIES = 1000
 
@@ -39,15 +42,23 @@ class RandomUniformSampler(VOSSampler):
         self.max_num_objects = max_num_objects
         self.reverse_time_prob = reverse_time_prob
 
-    def sample(self, video, segment_loader, epoch=None):
+    def sample(self, video, segment_loader, epoch=None, tta=False):
 
         for retry in range(MAX_RETRIES):
             if len(video.frames) < self.num_frames:
                 raise Exception(
                     f"Cannot sample {self.num_frames} frames from video {video.video_name} as it only has {len(video.frames)} annotated frames."
                 )
-            start = random.randrange(0, len(video.frames) - self.num_frames + 1)
-            # start = 75
+            if tta:
+                mask = segment_loader.load_mask()
+                _, start = self.mask_bbox(mask)
+
+            else:
+                mask = segment_loader.load_mask()
+                # print(f'mask shape: {mask.shape}')
+                _, start = self.mask_bbox(mask)
+                
+            
             frames = [video.frames[start + step] for step in range(self.num_frames)]
             if random.uniform(0, 1) < self.reverse_time_prob:
                 # Reverse time
@@ -78,7 +89,26 @@ class RandomUniformSampler(VOSSampler):
         )
         return SampledFramesAndObjects(frames=frames, object_ids=object_ids)
 
+    def mask_bbox(self, label):
+            print(f'print shape: {label.shape}')
+            # from torchvision.utils import save_image
 
+            if not isinstance(label, torch.Tensor):
+                  label = torch.tensor(label[1:])
+            label = label.sum(dim=0)
+
+            label_counts = (label != 0).sum(dim=(0, 1))  
+            print(f'label counts: {label_counts}')
+            best_slice = torch.argmax(label_counts)
+            points = []
+            mask = label[ :, :, best_slice]
+            if torch.all(mask == 0):
+                        box = torch.tensor([[0.0, 0.0, 0.0, 0.0]])
+            else:
+                        box = masks_to_boxes(mask.unsqueeze(0))
+            
+            return box, best_slice
+    
 class EvalSampler(VOSSampler):
     """
     VOS Sampler for evaluation: sampling all the frames and all the objects in a video

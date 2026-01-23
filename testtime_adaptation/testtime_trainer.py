@@ -397,35 +397,6 @@ class TestTimeTrainer(Trainer):
         outputs = model(batch)  
         outputs_batch.append(outputs)
 
-        feats = {}
-
-        def _save_enc(_m, _inp, out):
-            # SAM/SAM2 encoders usually return a Tensor; if it's a tuple, take the first.
-            
-            out = out['vision_features'] if isinstance(out, dict) and 'vision_features' in out else out
-            print(f'Inside the save enc function{out.shape}')
-            feats["enc"] = out.detach()
-
-        def _save_dec(_m, _inp, out):
-            print(f'The output from the decoder {out}')
-            
-            print(f'Inside the save dec function{out.shape}')
-            feats["dec"] = out.detach()
-
-        h_enc = model.image_encoder.register_forward_hook(_save_enc)
-        h_dec = model.sam_mask_decoder.penultimate_tap.register_forward_hook(_save_dec)
-        try:
-            outputs = model(batch)                # your existing forward
-        finally:
-            h_enc.remove()      
-            h_dec.remove()                  # always clean up
-
-        encoder_feats = feats.get("enc")     
-        decoder_feats = feats.get("dec")     # shape typically [B, 256, 64, 64]
-        outputs_batch.append(outputs)
-        print(f'Encoder features shape: {encoder_feats.shape}')
-        print(f'Decoder features shape: {decoder_feats.shape}')
-
 
         with torch.no_grad():
             outputs_anchor = teacher(batch)
@@ -443,14 +414,9 @@ class TestTimeTrainer(Trainer):
 
         batch_size = len(batch.img_batch)
 
-        encoder_feats = encoder_feats.detach().float().cpu()
-        decoder_feats = decoder_feats.detach().float().cpu()
-        encoder_feats, (Ne, He, We) = feats_pixels_as_samples(encoder_feats)
-        decoder_feats, (Nd, Hd, Wd) = feats_pixels_as_samples(decoder_feats)
 
-        if self.epoch == 0:
-            self.pca_enc = PCA(n_components=2, random_state=0).fit(encoder_feats)
-            self.pca_dec = PCA(n_components=2, random_state=0).fit(decoder_feats)
+
+
 
         # compute_class_separation(encoder_feats, decoder_feats, targets, self.epoch)
         self.log_validation_image(outputs, targets, self.logging_conf.log_dir, 'outs' )
@@ -458,7 +424,7 @@ class TestTimeTrainer(Trainer):
         print(f'batch size {batch.img_batch.shape, len(outputs), len(outputs[0])} and shape of targets: {targets.shape}')
         
         # decoder_feats = 
-        self.compute_class_separation(encoder_feats, decoder_feats, targets, self.epoch, self.pca_enc, self.pca_dec)
+
         batch_size = len(batch.img_batch)
 
         key = batch.dict_key  # key for dataset
@@ -480,13 +446,13 @@ class TestTimeTrainer(Trainer):
         with torch.cuda.amp.autocast(enabled=False):
             g1 = grad_vec(Loss_1, params)
             g2 = grad_vec(Loss_2, params)
-            g3 = grad_vec(Loss_3, params)
+            # g3 = grad_vec(Loss_3, params)
 
         n1 = g1.norm()
         n2 = g2.norm()
-        n3 = g3.norm()
+        # n3 = g3.norm()
         cos = (g1 @ g2) / (n1.clamp_min(1e-12) * n2.clamp_min(1e-12))
-        print(f"||∇L1||={float(n1):.3e}  ||∇L2||={float(n2):.3e}  ||∇L3||={float(n3):.3e}  cos={float(cos):.4f}")
+        # print(f"||∇L1||={float(n1):.3e}  ||∇L2||={float(n2):.3e}  ||∇L3||={float(n3):.3e}  cos={float(cos):.4f}")
         
         
         loss_str = f"Losses/{phase}_{key}_loss"

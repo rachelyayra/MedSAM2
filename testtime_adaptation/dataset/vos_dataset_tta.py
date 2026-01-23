@@ -44,17 +44,24 @@ class VOSDataset(VisionDataset):
         self.target_segments_available = target_segments_available
 
     def _get_datapoint(self, idx):
-
+        
         for retry in range(MAX_RETRIES):
+
             try:
                 if isinstance(idx, torch.Tensor):
                     idx = idx.item()
                 # sample a video
-                video, segment_loader = self.video_dataset.get_video(idx)
+                video, segment_loader, sup_video, sup_loader = self.video_dataset.get_video(idx)
                 # sample frames and object indices to be used in a datapoint
                 sampled_frms_and_objs = self.sampler.sample(
                     video, segment_loader, epoch=self.curr_epoch
                 )
+
+                # print(f'the samples {sampled_frms_and_objs}')
+                sup_sampled_frms_and_objs = self.sampler.sample(
+                    sup_video, sup_loader, epoch=self.curr_epoch, tta=True
+                )
+                # print(f'the samples {sup_sampled_frms_and_objs}')
                 break  # Succesfully loaded video
             except Exception as e:
                 if self.training:
@@ -65,11 +72,17 @@ class VOSDataset(VisionDataset):
                 else:
                     # Shouldn't fail to load a val video
                     raise e
+    
 
         datapoint = self.construct(video, sampled_frms_and_objs, segment_loader)
+        sup_datapoint = self.construct(sup_video, sup_sampled_frms_and_objs, sup_loader)
         for transform in self._transforms:
             datapoint = transform(datapoint, epoch=self.curr_epoch)
-        return datapoint, video, segment_loader
+            sup_datapoint = transform(sup_datapoint, epoch=self.curr_epoch)
+        return (datapoint, video, segment_loader), (sup_datapoint, sup_video, sup_loader)
+
+    def get_starting_frame(self, video_length, num_frames):
+        return frame
 
     def construct(self, video, sampled_frms_and_objs, segment_loader):
         """
